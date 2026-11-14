@@ -1,0 +1,20 @@
+{
+  "name": "voxnovel",
+  "version": "0.1.0",
+  "description": "Turn novels into multi-character audiobooks with AI-powered character recognition and consistent voices.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --watch --env-file-if-exists=.env --disable-warning=ExperimentalWarning server/index.js",
+    "test:identity": "node --disable-warning=ExperimentalWarning test/identity.mjs",
+    "test:identity:prepare": "node test/prepare-identity.mjs",
+    "test:identity:live": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning test/live-identity.mjs",
+    "test:e2e": "node --disable-warning=ExperimentalWarning test/e2e.mjs",
+    "test:live": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning test/live.mjs"
+  },
+  "license": "MIT"
+}

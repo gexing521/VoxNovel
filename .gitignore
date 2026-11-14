@@ -1,0 +1,31 @@
+# Runtime data: credentials, databases, novel text, audio and test output
+node_modules/
+data/
+coverage/
+
+# Local environment and credentials; publish only the blank template
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# Databases and local backups
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.bak
+*.backup
+
+# Logs, editor and OS files
+*.log
+.DS_Store
+.vscode/
+.idea/

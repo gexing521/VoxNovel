@@ -1,0 +1,16 @@
+services:
+  novel-voice-studio:
+    build: .
+    image: novel-voice-studio:latest
+    container_name: novel-voice-studio
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - PORT=3000
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data

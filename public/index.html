@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>小说有声工坊</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23c2410c'/><path d='M10 9v14M16 6v20M22 11v10' stroke='white' stroke-width='3' stroke-linecap='round'/></svg>" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div id="login" class="login hidden">
+  <form id="loginForm" class="login-card">
+    <div class="brand big"><span class="logo"></span>小说有声工坊</div>
+    <input type="password" name="password" placeholder="访问密码" autofocus />
+    <button class="btn primary" type="submit">进入</button>
+    <div class="err" id="loginErr"></div>
+  </form>
+</div>
+
+<div id="app" class="layout hidden">
+  <aside class="side">
+    <div class="brand"><span class="logo"></span>小说有声工坊</div>
+    <nav>
+      <a href="#/novels" data-nav="novels">小说库</a>
+      <a href="#/characters" data-nav="characters">角色库</a>
+      <a href="#/voices" data-nav="voices">音色库</a>
+      <a href="#/jobs" data-nav="jobs">任务<span id="jobBadge" class="badge hidden"></span></a>
+      <a href="#/settings" data-nav="settings">设置</a>
+    </nav>
+    <div class="side-foot">
+      <a href="https://www.minimax.cn/audio/voices" target="_blank" rel="noopener">MiniMax 官方音色库 ↗</a>
+      <button id="logoutBtn" class="link hidden">退出登录</button>
+    </div>
+  </aside>
+  <main id="view" class="main"></main>
+</div>
+
+<div id="modalRoot"></div>
+<div id="toasts" class="toasts"></div>
+<div id="player" class="player hidden">
+  <div class="player-info"><b id="playerTitle"></b><span id="playerSub"></span></div>
+  <audio id="audio" controls></audio>
+  <button class="icon" id="playerClose" title="关闭">✕</button>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
