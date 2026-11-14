@@ -218,7 +218,7 @@ async function viewNovel(id) {
             <td><div class="row" style="gap:4px;justify-content:flex-end">
               <button class="btn sm" data-split>${c.split_status === 'done' ? '重新拆分' : '拆分'}</button>
               <button class="btn sm" data-gen ${c.split_status === 'done' ? '' : 'disabled'}>生成</button>
-              <a class="btn sm" href="/api/chapters/${c.id}/download" title="下载本章 MP3 和 LRC ZIP" ${c.done_count ? '' : 'aria-disabled="true" tabindex="-1" style="opacity:.5;pointer-events:none"'}>下载</a>
+              <a class="btn sm" href="/api/chapters/${c.id}/download-merged" title="下载整章拼接 MP3 和 LRC" ${c.merged_audio && c.merged_lrc ? '' : 'aria-disabled="true" tabindex="-1" style="opacity:.5;pointer-events:none"'}>下载整章</a>
               <a class="btn sm" href="#/chapter/${c.id}">编辑</a>
               <button class="icon" data-chdel title="删除章节">✕</button>
             </div></td>

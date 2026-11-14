@@ -271,6 +271,15 @@ route('POST', '/api/chapters/:id/generate', (req, res, { id }, body) => ({
   jobId: startGenerate([Number(id)], { force: !!body.force, segmentIds: body.segmentIds?.length ? body.segmentIds.map(Number) : null }),
 }));
 route('POST', '/api/chapters/:id/merge', (req, res, { id }) => ({ ok: buildMerged(Number(id)) }));
+route('GET', '/api/chapters/:id/download-merged', async (req, res, { id }) => {
+  const c = q.get('SELECT * FROM chapters WHERE id = ?', id) || notFound();
+  const n = q.get('SELECT * FROM novels WHERE id = ?', c.novel_id);
+  if (!c.merged_audio || !c.merged_lrc || !fs.existsSync(path.join(AUDIO_DIR, c.merged_audio)) || !fs.existsSync(path.join(AUDIO_DIR, c.merged_lrc))) bad('整章音频尚未生成');
+  return zipResponse(res, `${safeName(n.title)}_${safeName(c.title)}_整章.zip`, [
+    { name: path.basename(c.merged_audio), path: path.join(AUDIO_DIR, c.merged_audio) },
+    { name: path.basename(c.merged_lrc), path: path.join(AUDIO_DIR, c.merged_lrc) },
+  ]);
+});
 route('GET', '/api/chapters/:id/download', async (req, res, { id }) => {
   const c = q.get('SELECT * FROM chapters WHERE id = ?', id) || notFound();
   const n = q.get('SELECT * FROM novels WHERE id = ?', c.novel_id);

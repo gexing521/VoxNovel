@@ -188,7 +188,7 @@ try {
   console.log(lrc.split('\n').map((l) => '  ' + l).join('\n'));
   assert(/\[00:00\.\d\d\]/.test(lrc) && lrc.includes('[ti:'), '每段 LRC 正确生成');
   assert(ch2.merged_audio && fs.existsSync(path.join(DATA, 'audio', ch2.merged_audio)), '整章 MP3 合并');
-  const cz = await fetch(`${base}/chapters/${ch2.id}/download`);
+  const cz = await fetch(`${base}/chapters/${ch2.id}/download-merged`);
   const chapterZip = Buffer.from(await cz.arrayBuffer());
   const entryNames = [];
   for (let offset = 0; offset + 30 <= chapterZip.length && chapterZip.readUInt32LE(offset) === 0x04034b50;) {
@@ -196,11 +196,15 @@ try {
     entryNames.push(chapterZip.toString('utf8', offset + 30, offset + 30 + nameLength));
     offset += 30 + nameLength + extraLength + size;
   }
-  assert(cz.ok && entryNames.some((x) => x.endsWith('.mp3')) && entryNames.some((x) => x.endsWith('.lrc')) && entryNames.some((x) => x.includes('整章.mp3')) && entryNames.some((x) => x.includes('整章.lrc')), '单章下载 ZIP 同时包含片段 MP3/LRC 和整章 MP3/LRC');
+  assert(cz.ok && entryNames.length === 2 && entryNames.some((x) => x === path.basename(ch2.merged_audio)) && entryNames.some((x) => x === path.basename(ch2.merged_lrc)), '整章下载 ZIP 只包含所选章节拼接后的 MP3 与 LRC');
+  const segmentZipResponse = await fetch(`${base}/chapters/${ch2.id}/download`);
+  const segmentZip = Buffer.from(await segmentZipResponse.arrayBuffer());
+  const segmentCount = [...segmentZip.toString('latin1').matchAll(/PK\x01\x02/g)].length;
+  assert(segmentZipResponse.ok && segmentCount > 2, '章节详情原下载仍保留全部分段文件');
   const emptyNovel = await call('/novels', { title: '未生成下载测试', content: '尚未生成音频。', autoDetect: false });
   const emptyChapter = (await call('/novels/' + emptyNovel.id)).chapters[0];
-  const chapterEmpty = await fetch(`${base}/chapters/${emptyChapter.id}/download`);
-  assert(chapterEmpty.status === 400, '未生成音频的章节下载返回明确错误');
+  const chapterEmpty = await fetch(`${base}/chapters/${emptyChapter.id}/download-merged`);
+  assert(chapterEmpty.status === 400, '尚未生成整章拼接文件时下载按钮不可用并返回明确错误');
   const mlrc = fs.readFileSync(path.join(DATA, 'audio', ch2.merged_lrc), 'utf8');
   assert(mlrc.split('\n').filter((l) => /^\[\d\d:\d\d/.test(l)).length > ch2.segments.length, '整章 LRC 时间轴');
 
