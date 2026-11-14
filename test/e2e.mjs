@@ -188,6 +188,19 @@ try {
   console.log(lrc.split('\n').map((l) => '  ' + l).join('\n'));
   assert(/\[00:00\.\d\d\]/.test(lrc) && lrc.includes('[ti:'), '每段 LRC 正确生成');
   assert(ch2.merged_audio && fs.existsSync(path.join(DATA, 'audio', ch2.merged_audio)), '整章 MP3 合并');
+  const cz = await fetch(`${base}/chapters/${ch2.id}/download`);
+  const chapterZip = Buffer.from(await cz.arrayBuffer());
+  const entryNames = [];
+  for (let offset = 0; offset + 30 <= chapterZip.length && chapterZip.readUInt32LE(offset) === 0x04034b50;) {
+    const nameLength = chapterZip.readUInt16LE(offset + 26), extraLength = chapterZip.readUInt16LE(offset + 28), size = chapterZip.readUInt32LE(offset + 18);
+    entryNames.push(chapterZip.toString('utf8', offset + 30, offset + 30 + nameLength));
+    offset += 30 + nameLength + extraLength + size;
+  }
+  assert(cz.ok && entryNames.some((x) => x.endsWith('.mp3')) && entryNames.some((x) => x.endsWith('.lrc')) && entryNames.some((x) => x.includes('整章.mp3')) && entryNames.some((x) => x.includes('整章.lrc')), '单章下载 ZIP 同时包含片段 MP3/LRC 和整章 MP3/LRC');
+  const emptyNovel = await call('/novels', { title: '未生成下载测试', content: '尚未生成音频。', autoDetect: false });
+  const emptyChapter = (await call('/novels/' + emptyNovel.id)).chapters[0];
+  const chapterEmpty = await fetch(`${base}/chapters/${emptyChapter.id}/download`);
+  assert(chapterEmpty.status === 400, '未生成音频的章节下载返回明确错误');
   const mlrc = fs.readFileSync(path.join(DATA, 'audio', ch2.merged_lrc), 'utf8');
   assert(mlrc.split('\n').filter((l) => /^\[\d\d:\d\d/.test(l)).length > ch2.segments.length, '整章 LRC 时间轴');
 
