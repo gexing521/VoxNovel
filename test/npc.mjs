@@ -94,6 +94,12 @@ try {
   db.prepare("UPDATE characters SET role_hint='npc' WHERE id=?").run(hinted.id);
   await api('/novels/' + novel.id + '/npc-assign', {});
   check((await chars()).find(c => c.id === hinted.id).is_npc, '复杂无名描述支持模型的姓名判定标记');
+  await stop();
+  db.prepare("UPDATE voices SET gender='' WHERE voice_id='male-qn-qingse'").run();
+  db.prepare("DELETE FROM settings WHERE key='_npc_pools_initialized'").run();
+  db.prepare('DELETE FROM npc_pools').run();
+  await start();
+  check((await api('/npc-pools'))[0].voices.find(v => v.voice_id==='male-qn-qingse').gender==='male', '旧音色元数据性别未知时迁移仍可启动，合集性别独立初始化');
   check(db.prepare('PRAGMA integrity_check').get().integrity_check === 'ok', '数据库完整性正常');
   console.log(`全部通过（${checks} 项），临时目录：${data}`);
 } finally {

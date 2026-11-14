@@ -246,9 +246,9 @@ if (!q.get("SELECT 1 FROM settings WHERE key = '_npc_pools_initialized'")) {
   tx(() => {
     const pool = q.run('INSERT INTO npc_pools(name) VALUES (?)', '默认 NPC 音色合集').id;
     const seed = ['male-qn-qingse', 'male-qn-jingying', 'male-qn-badao', 'male-qn-daxuesheng', 'Chinese (Mandarin)_Gentleman', 'Chinese (Mandarin)_Reliable_Executive', 'female-shaonv', 'female-yujie', 'female-chengshu', 'female-tianmei', 'Chinese (Mandarin)_Warm_Bestie', 'Chinese (Mandarin)_Wise_Women'];
-    for (const key of seed) {
-      const v = q.get('SELECT id,gender FROM voices WHERE voice_id = ?', key);
-      if (v) q.run('INSERT INTO npc_pool_voices(pool_id,voice_id,gender) VALUES (?,?,?)', pool, v.id, v.gender);
+    for (const [index, key] of seed.entries()) {
+      const v = q.get('SELECT id FROM voices WHERE voice_id = ?', key);
+      if (v) q.run('INSERT INTO npc_pool_voices(pool_id,voice_id,gender) VALUES (?,?,?)', pool, v.id, index < 6 ? 'male' : 'female');
     }
     q.run("INSERT INTO settings(key,value) VALUES ('_npc_pools_initialized','1')");
   });

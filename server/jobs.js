@@ -10,7 +10,7 @@ import { guessAgeTag, isMandarinVoice } from './voices-seed.js';
 import { chatJson } from './llm.js';
 import { CASTING_SYSTEM, castingUserMessage } from './prompts.js';
 import { scopedCharacterByName, scopedCharacters, reconcileNovel } from './identity.js';
-import { isNpc, npcVoice, assignNovelNpcs, describeNpc } from './npc.js';
+import { isNpc, npcVoice, assignNovelNpcs, describeNpc, invalidateCharacterAudio } from './npc.js';
 
 export const AUDIO_DIR = path.join(DATA_DIR, 'audio');
 export const PREVIEW_DIR = path.join(DATA_DIR, 'previews');
@@ -217,6 +217,7 @@ export function startSplit(chapterIds, { mode, reconcile } = {}) {
   if (!chapters.length) throw new Error('没有可拆分的章节');
   if (chapters.some(c => c.novel_id !== chapters[0].novel_id)) throw new Error('一次只能拆分同一本小说');
   const novel = q.get('SELECT * FROM novels WHERE id = ?', chapters[0].novel_id);
+  if (q.get("SELECT id FROM jobs WHERE novel_id = ? AND type = 'generate' AND status IN ('queued','running')", novel.id)) throw new Error('本书正在生成音频，请完成或取消生成后再拆分');
   const jobId = createJob('split', `拆分《${novel.title}》${chapters.length > 1 ? chapters.length + ' 章' : chapters[0].title}`, novel.id, chapters.map((c) => c.id), chapters.length);
   for (const c of chapters) q.run(`UPDATE chapters SET split_status = 'queued', split_error = NULL WHERE id = ?`, c.id);
   return enqueue('split', jobId, async (signal) => {
@@ -266,6 +267,7 @@ export async function splitChapter(chapterId, { mode, signal, onProgress } = {})
   tx(() => {
     // 写入/更新角色
     for (const k of known) {
+      const before = k.id ? q.get('SELECT * FROM characters WHERE id = ?', k.id) : null;
       if (k._new) {
         if (findCharacterByName(chapter.novel_id, k.name)) continue;
         q.run('INSERT INTO characters(novel_id, name, aliases, gender, age, description, role_hint) VALUES (?, ?, ?, ?, ?, ?, ?)', chapter.novel_id, k.name, k.aliases || '', k.gender || '', k.age || '', k.description || '', k.role_hint || '');
@@ -275,6 +277,11 @@ export async function splitChapter(chapterId, { mode, signal, onProgress } = {})
         q.run(`UPDATE characters SET aliases = ?, gender = COALESCE(NULLIF(gender,''), ?), age = COALESCE(NULLIF(age,''), ?), description = COALESCE(NULLIF(description,''), ?) WHERE id = ?`, aliases, k.gender || '', k.age || '', k.description || '', k.id);
       }
       if (k.id && k.role_hint) q.run('UPDATE characters SET role_hint = ? WHERE id = ?', k.role_hint, k.id);
+      if (before) {
+        const fresh = q.get('SELECT * FROM characters WHERE id = ?', k.id);
+        if (isNpc(before) !== isNpc(fresh)) invalidateCharacterAudio(k.id);
+        if (!isNpc(fresh)) q.run('DELETE FROM npc_assignments WHERE character_id = ?', k.id);
+      }
     }
     // 删除旧片段与旧音频
     removeChapterAudio(chapter);

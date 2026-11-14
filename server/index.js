@@ -402,8 +402,10 @@ route('POST', '/api/characters/:id/merge', (req, res, { id }, body) => {
   // 把当前角色合并到 target（台词、别名、音色绑定转移）
   const src = q.get('SELECT * FROM characters WHERE id = ?', id) || notFound();
   const dst = q.get('SELECT * FROM characters WHERE id = ?', body.targetId) || notFound('目标角色不存在');
-  if (src.id === dst.id || src.is_narrator) bad('无法合并');
+  if (src.id === dst.id || src.is_narrator || src.novel_id !== dst.novel_id) bad('无法合并');
+  assertIdle(src.novel_id);
   tx(() => {
+    invalidateCharacterAudio(src.id);
     q.run('UPDATE segments SET character_id = ?, speaker = ? WHERE character_id = ?', dst.id, dst.name, src.id);
     const al = new Set([...(dst.aliases || '').split(/[,，、\s]+/), src.name, ...(src.aliases || '').split(/[,，、\s]+/)].filter((x) => x && x !== dst.name));
     q.run('UPDATE characters SET aliases = ? WHERE id = ?', [...al].join(','), dst.id);

@@ -1,6 +1,6 @@
 import { q, tx, getSettings } from './db.js';
 import { analyzeIdentities, identityFingerprint, validateIdentities } from './identity-analysis.js';
-import { isNpc, npcVoice, invalidateCharacterAudio } from './npc.js';
+import { isNpc, npcVoice, invalidateCharacterAudio, describeNpc } from './npc.js';
 
 const names = text => String(text || '').split(/[,，、\s]+/).filter(Boolean);
 export const getIdentityReport = novelId => {
@@ -37,7 +37,15 @@ export function scopedCharacterByName(novelId, name, chapterId) {
   const hits = list.filter(c => names(c.aliases).includes(name));
   return hits.length === 1 ? hits[0] : null;
 }
-const defaultVoice = id => id ? q.get('SELECT voice_id,speed,vol,pitch FROM character_voices WHERE character_id = ? ORDER BY is_default DESC,created_at LIMIT 1', id) : null;
+const defaultVoice = id => {
+  if (!id) return null;
+  const c = q.get('SELECT * FROM characters WHERE id = ?', id);
+  if (isNpc(c)) {
+    const v = describeNpc(c).npc_voice;
+    return v ? { voice_id: v.id, speed: 1, vol: 1, pitch: 0 } : null;
+  }
+  return q.get('SELECT voice_id,speed,vol,pitch FROM character_voices WHERE character_id = ? ORDER BY is_default DESC,created_at LIMIT 1', id);
+};
 
 /** 事务中同步旧台词、角色别名和音色；不重拆正文或删除已有音频文件。 */
 export function applyIdentityReport(novelId, input, chapters) {
