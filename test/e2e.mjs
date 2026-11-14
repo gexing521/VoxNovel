@@ -38,7 +38,7 @@ const llm = http.createServer(async (req, res) => {
       characters: [
         { name: '林默', gender: 'male', age: 'young', aliases: ['小林'], description: '男主' },
         { name: '苏晴', gender: 'female', age: 'young', aliases: [], description: '女主' },
-        { name: '老板', gender: 'male', age: 'middle', aliases: [], description: '' },
+        { name: '老板', is_named: false, gender: 'male', age: 'middle', aliases: [], description: '' },
       ],
       dialogues,
     };
@@ -165,7 +165,7 @@ try {
   assert(ch.segments.some((x) => x.type === 'narration' && x.text.includes('“命运”')), '非对白引号保留在旁白中');
   assert(dl[4].emotion === 'angry', '情绪识别写入');
   const chars = await call('/characters?novel_id=' + novel.id);
-  assert(chars.length === 4 && chars.every((c) => c.voices.length), '角色入库（含旁白）且全部自动分配音色');
+  assert(chars.length === 4 && chars.every((c) => c.is_npc ? c.npc_voice : c.voices.length), '角色入库（含旁白）且实名与 NPC 均自动分配音色');
   assert(chars.find((c) => c.name === '林默').aliases.includes('小林'), '别名入库');
 
   // 多对多绑定：给林默再绑一个音色并设为默认；同一音色绑给苏晴

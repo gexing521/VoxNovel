@@ -148,7 +148,9 @@ function mergeCharacters(known, incoming) {
     if (!name || ['旁白', '未知', '未知角色', '叙述者'].includes(name)) continue;
     const aliases = Array.isArray(c.aliases) ? c.aliases.filter((a) => typeof a === 'string' && a.trim()) : [];
     const hit = known.find((k) => k.name === name || (k.aliases || '').split(/[,，、\s]+/).includes(name));
+    const roleHint = typeof c.is_named === 'boolean' ? (c.is_named ? 'named' : 'npc') : '';
     if (hit) {
+      if (roleHint) hit.role_hint = roleHint;
       const set = new Set((hit.aliases || '').split(/[,，、\s]+/).filter(Boolean));
       aliases.forEach((a) => a !== hit.name && set.add(a));
       hit.aliases = [...set].join(',');
@@ -158,6 +160,7 @@ function mergeCharacters(known, incoming) {
     } else {
       known.push({
         name,
+        role_hint: roleHint,
         gender: normGender(c.gender),
         age: normAge(c.age),
         aliases: aliases.filter((a) => a !== name).join(','),

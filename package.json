@@ -13,6 +13,7 @@
     "test:identity": "node --disable-warning=ExperimentalWarning test/identity.mjs",
     "test:identity:prepare": "node test/prepare-identity.mjs",
     "test:identity:live": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning test/live-identity.mjs",
+    "test:npc": "node --disable-warning=ExperimentalWarning test/npc.mjs",
     "test:e2e": "node --disable-warning=ExperimentalWarning test/e2e.mjs",
     "test:live": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning test/live.mjs"
   },

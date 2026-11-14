@@ -1,4 +1,4 @@
-import { $, $$, api, esc, modal, toast, guard, previewVoice, genderTag, SOURCES, GENDER, AGE, confirmBox } from './lib.js';
+import { $, $$, api, esc, modal, toast, guard, previewVoice, genderTag, SOURCES, GENDER, AGE, confirmBox, promptBox } from './lib.js';
 
 let voicesCache = null;
 export async function loadVoices(force = false) {
@@ -116,10 +116,114 @@ export async function openVoicePicker({ title = '选择音色', currentId = null
   bindVoiceCommon(m.el, () => list);
 }
 
+/** NPC 使用集合分配的音色，普通角色保留独立音色绑定。 */
+export const isNpcCharacter = (c) => !c.is_narrator && (c.role_type === 'npc' || (c.role_type !== 'named' && !!c.is_npc));
+export const npcGender = (c) => (c.npc_gender || c.gender) === 'female' ? 'female' : 'male';
+export const characterVoice = (c) => isNpcCharacter(c) ? c.npc_voice : (c.voices || []).find((v) => v.is_default) || (c.voices || [])[0];
+
+/** NPC 音色集合。分组由成员 gender 决定，与音色库元数据无关。 */
+export async function openNpcPoolManager({ poolId = null, novelId = null, onChanged } = {}) {
+  let pools = await guard(() => api('/npc-pools'));
+  if (novelId && poolId == null) {
+    const novel = await guard(() => api('/novels/' + novelId));
+    poolId = novel.npc_pool_id;
+  }
+  let selectedId = poolId ?? pools[0]?.id ?? null;
+  let busy = false;
+  const m = modal({
+    title: 'NPC 音色集合', wide: true,
+    body: '<div data-pool-manager></div>',
+    foot: '<button class="btn" data-pool-close>关闭</button>',
+  });
+  const box = m.el.querySelector('[data-pool-manager]');
+  const render = () => {
+    const pool = pools.find((p) => p.id === selectedId) || pools[0];
+    selectedId = pool?.id ?? null;
+    box.innerHTML = `<p class="small muted">为男 NPC、女 NPC 分别准备可复用的音色。添加时所选分组决定集合内性别，不修改音色库的性别。角色保留原名，无需逐个挑选音色。</p>
+      <div class="row" style="margin-bottom:16px">
+        <select data-pool-select aria-label="NPC 音色集合" style="flex:1" ${pools.length ? '' : 'disabled'}>${pools.length ? pools.map((p, i) => `<option value="${p.id}" ${p.id === selectedId ? 'selected' : ''}>${esc(p.name)}${i === 0 ? '（默认）' : ''}</option>`).join('') : '<option>暂无集合</option>'}</select>
+        <button class="btn sm primary" data-pool-create>+ 新建集合</button>
+        ${pool ? `<button class="btn sm" data-pool-rename>重命名</button><button class="btn sm danger" data-pool-delete ${pools.length < 2 ? 'disabled title="至少保留一个 NPC 音色集合"' : ''}>删除集合</button>` : ''}
+      </div>
+      ${pool ? `<div class="grid2">${['male', 'female'].map((gender) => {
+        const voices = (pool.voices || []).filter((v) => (v.pool_gender || v.gender) === gender);
+        const label = gender === 'male' ? '男 NPC' : '女 NPC';
+        return `<section class="panel"><div class="row" style="margin-bottom:10px"><b>${label} · ${voices.length} 个音色</b><div class="grow"></div><button class="btn sm" data-pool-add="${gender}">+ 添加${gender === 'male' ? '男' : '女'}声</button></div>
+          ${voices.length ? voices.map((v) => `<div class="row" style="padding:8px 0;border-bottom:1px solid var(--line)">
+            <button class="play" data-pool-preview="${v.id}" title="试听">▶</button>
+            <div style="flex:1;min-width:100px"><b>${esc(v.name || v.voice_id)}</b><div class="small muted mono">${esc(v.voice_id)}</div></div>
+            <select data-pool-gender="${v.id}" aria-label="${esc(v.name || v.voice_id)}的集合性别"><option value="male" ${gender === 'male' ? 'selected' : ''}>男 NPC</option><option value="female" ${gender === 'female' ? 'selected' : ''}>女 NPC</option></select>
+            <button class="icon" data-pool-remove="${v.id}" title="从集合移除">✕</button>
+          </div>`).join('') : '<div class="small muted">此分组还没有音色，请先添加。</div>'}
+        </section>`;
+      }).join('')}</div>` : '<div class="empty">新建一个集合，再分别添加男声和女声。</div>'}
+      <p class="small muted">小说可选择使用哪个集合；未指定时使用列表中的默认集合。整理 NPC 时仅补充分配，已有音色保留；需要换一批音色时，在小说的「角色与音色」中明确重新分配。</p>`;
+  };
+  const mutate = async (fn, message, nextId) => {
+    if (busy) return;
+    busy = true;
+    box.querySelectorAll('button,select').forEach((el) => { el.disabled = true; });
+    try {
+      await guard(async () => {
+        const result = await fn();
+        pools = await api('/npc-pools');
+        if (nextId) selectedId = nextId(result);
+        await onChanged?.();
+      }, message);
+    } catch (e) {
+      // guard 已显示 API 错误；保留弹窗以便重试。
+    } finally { busy = false; render(); }
+  };
+  render();
+  m.el.addEventListener('change', async (e) => {
+    if (busy) return;
+    if (e.target.matches('[data-pool-select]')) { selectedId = Number(e.target.value); return render(); }
+    const select = e.target.closest('[data-pool-gender]');
+    if (select) await mutate(() => api(`/npc-pools/${selectedId}/voices`, { body: { voice_db_id: Number(select.dataset.poolGender), gender: select.value } }), '已更新集合内性别');
+  });
+  m.el.addEventListener('click', async (e) => {
+    const t = e.target;
+    if (t.closest('[data-pool-close]')) return m.close();
+    if (busy) return;
+    const pool = pools.find((p) => p.id === selectedId);
+    if (t.closest('[data-pool-create]')) {
+      const name = await promptBox('新建 NPC 音色集合', { placeholder: '如：通用配角、武侠配角' });
+      if (!name?.trim()) return;
+      return mutate(() => api('/npc-pools', { body: { name: name.trim() } }), '集合已创建', (r) => r.id);
+    }
+    if (!pool) return;
+    if (t.closest('[data-pool-rename]')) {
+      const name = await promptBox('重命名 NPC 音色集合', { value: pool.name });
+      if (!name?.trim() || name.trim() === pool.name) return;
+      return mutate(() => api('/npc-pools/' + pool.id, { method: 'PUT', body: { name: name.trim() } }), '集合已重命名');
+    }
+    if (t.closest('[data-pool-delete]')) {
+      if (!(await confirmBox(`删除 NPC 音色集合「${pool.name}」？集合中的音色仍保留在音色库中。使用该集合的小说将改用默认集合。`, { danger: true, okText: '删除集合' }))) return;
+      return mutate(() => api('/npc-pools/' + pool.id, { method: 'DELETE' }), '集合已删除');
+    }
+    const add = t.closest('[data-pool-add]');
+    if (add) {
+      const gender = add.dataset.poolAdd;
+      const targetId = pool.id;
+      return openVoicePicker({
+        title: `添加到「${pool.name}」· ${gender === 'male' ? '男 NPC' : '女 NPC'}`,
+        onPick: (v) => mutate(() => api(`/npc-pools/${targetId}/voices`, { body: { voice_db_id: v.id, gender } }), '已添加到集合'),
+      });
+    }
+    const remove = t.closest('[data-pool-remove]');
+    if (remove) return mutate(() => api(`/npc-pools/${pool.id}/voices/${Number(remove.dataset.poolRemove)}`, { method: 'DELETE' }), '已从集合移除');
+    const preview = t.closest('[data-pool-preview]');
+    if (preview) {
+      const voice = pool.voices.find((v) => v.id === Number(preview.dataset.poolPreview));
+      if (voice) return previewVoice(voice.voice_id, preview, { title: voice.name || voice.voice_id });
+    }
+  });
+}
+
 /** 角色编辑弹窗：基本信息 + 多音色绑定 */
 export async function openCharacterModal(charId, { novels = null, novelId = null, onSaved } = {}) {
   const isNew = !charId;
-  let c = { name: '', aliases: '', gender: '', age: '', description: '', novel_id: novelId, voices: [] };
+  let c = { name: '', aliases: '', gender: '', age: '', description: '', novel_id: novelId, role_type: 'auto', voices: [] };
   if (!isNew) {
     const all = await api('/characters' + (novelId ? '?novel_id=' + novelId : ''));
     c = all.find((x) => x.id === charId) || (await api('/characters')).find((x) => x.id === charId);
@@ -136,19 +240,30 @@ export async function openCharacterModal(charId, { novels = null, novelId = null
         </select></label>
         <label class="field">性别<select name="gender">${Object.entries(GENDER).map(([k, v]) => `<option value="${k}" ${k === (c.gender || '') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
         <label class="field">年龄段<select name="age"><option value="">未知</option>${['child', 'young', 'middle', 'old'].map((k) => `<option value="${k}" ${k === c.age ? 'selected' : ''}>${AGE[k]}</option>`).join('')}</select></label>
+        <label class="field">角色类型<select name="role_type" ${c.is_narrator ? 'disabled' : ''}>${[['auto', '自动识别'], ['named', '正式角色（独立音色）'], ['npc', 'NPC（使用音色集合）']].map(([k, label]) => `<option value="${k}" ${k === (c.role_type || 'auto') ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
       </div>
+      <p class="small muted">自动识别会区分正式角色与 NPC；也可手动指定。NPC 无需逐个选音色，按性别从小说所选集合分配；性别未知默认按男 NPC 处理，可在上方改为女性。</p>
       <label class="field">别名 / 称呼<span class="hint">逗号分隔。拆分时 LLM 会把这些称呼识别为同一角色</span><input name="aliases" value="${esc(c.aliases)}" /></label>
       <label class="field">人设描述<textarea name="description" rows="2">${esc(c.description)}</textarea></label>
-      ${isNew ? '' : `<div><h3>绑定音色 <span class="muted small">（可绑定多个，★ 为默认使用的音色；语速/音量/音调仅对该角色生效）</span></h3>
+      <div data-npc-binding></div>
+      ${isNew ? '' : `<div data-named-binding><h3>绑定音色 <span class="muted small">（可绑定多个，★ 为默认使用的音色；语速/音量/音调仅对该角色生效）</span></h3>
         <div data-binds class="settings-sec" style="gap:8px"></div>
         <button class="btn sm" data-add style="margin-top:10px">+ 添加音色</button></div>`}`,
     foot: `${!isNew && !c.is_narrator ? '<button class="btn danger" data-delete style="margin-right:auto">删除角色</button>' : ''}<button class="btn" data-cancel>关闭</button><button class="btn primary" data-save>保存</button>`,
   });
 
   const renderBinds = () => {
+    const role = m.el.querySelector('[name=role_type]').value;
+    const npc = !c.is_narrator && (role === 'npc' || (role === 'auto' && isNpcCharacter(c)));
+    const npcBox = m.el.querySelector('[data-npc-binding]');
+    const namedBox = m.el.querySelector('[data-named-binding]');
+    if (namedBox) namedBox.hidden = npc;
+    npcBox.hidden = !npc;
+    const v = c.npc_voice;
+    npcBox.innerHTML = npc ? `<div class="panel"><h3>NPC 集合音色</h3><p class="small">${v ? `当前：<b>${esc(v.name || v.voice_id)}</b> <button class="play" data-npc-preview title="试听">▶</button>` : '保存后按小说所选集合自动分配音色；也可在小说的「角色与音色」中点击「整理 NPC 并自动配音」。'}</p><p class="small muted">无需单独绑定音色。修改类型或性别后保存，自动更新相应分配；要更换已有分配，请使用小说中的「重新分配 NPC 音色」。</p><button class="btn sm" data-npc-pools>管理 NPC 音色集合</button></div>` : '';
     const box = m.el.querySelector('[data-binds]');
     if (!box) return;
-    box.innerHTML = c.voices.length
+    box.innerHTML = (c.voices || []).length
       ? c.voices.map((v) => `<div class="row" style="border:1px solid var(--line);border-radius:8px;padding:8px 10px" data-bv="${v.id}">
           <button class="star ${v.is_default ? 'on' : ''}" data-def title="设为默认">★</button>
           <button class="play" data-play title="试听">▶</button>
@@ -172,6 +287,8 @@ export async function openCharacterModal(charId, { novels = null, novelId = null
   m.el.addEventListener('click', async (e) => {
     const t = e.target;
     if (t.closest('[data-cancel]')) return m.close();
+    if (t.closest('[data-npc-pools]')) return openNpcPoolManager({ novelId: c.novel_id, onChanged: reload });
+    if (t.closest('[data-npc-preview]') && c.npc_voice) return previewVoice(c.npc_voice.voice_id, t.closest('[data-npc-preview]'), { title: `${c.name} · ${c.npc_voice.name}` });
     if (t.closest('[data-add]')) {
       return openVoicePicker({
         title: `为「${c.name}」添加音色`,
@@ -198,7 +315,7 @@ export async function openCharacterModal(charId, { novels = null, novelId = null
     }
     if (t.closest('[data-save]')) {
       const get = (n) => m.el.querySelector(`[name=${n}]`).value;
-      const body = { name: get('name').trim(), aliases: get('aliases'), gender: get('gender'), age: get('age'), description: get('description') };
+      const body = { name: get('name').trim(), aliases: get('aliases'), gender: get('gender'), age: get('age'), description: get('description'), role_type: get('role_type') };
       if (isNew) {
         body.novel_id = get('novel_id') ? Number(get('novel_id')) : null;
         const nc = await guard(() => api('/characters', { body }), '已创建');
@@ -212,6 +329,7 @@ export async function openCharacterModal(charId, { novels = null, novelId = null
     }
   });
   m.el.addEventListener('change', async (e) => {
+    if (e.target.matches('[name=role_type]')) return renderBinds();
     const inp = e.target.closest('[data-k]');
     if (!inp) return;
     const vid = Number(inp.closest('[data-bv]').dataset.bv);
@@ -222,23 +340,34 @@ export async function openCharacterModal(charId, { novels = null, novelId = null
 }
 
 /** 角色表格（角色库页 & 小说详情页共用） */
-export function characterTable(list, { showNovel = true } = {}) {
+export function characterTable(list, { showNovel = true, openNpcGroups = [] } = {}) {
   if (!list.length) return '<div class="empty">暂无角色。拆分章节后会自动识别角色，也可以手动新建。</div>';
-  return `<div class="tbl-wrap"><table class="tbl">
-    <thead><tr><th>角色</th>${showNovel ? '<th>小说</th>' : ''}<th>性别/年龄</th><th>别名</th><th>台词</th><th>绑定音色</th><th style="width:150px"></th></tr></thead>
-    <tbody>${list.map((c) => `<tr data-cid="${c.id}">
-      <td><span class="dot" style="background:${c.is_narrator ? 'var(--narr)' : colorOfName(c.name)}"></span> <b>${esc(c.name)}</b>${c.description ? `<div class="small muted" style="max-width:260px">${esc(c.description)}</div>` : ''}</td>
+  const table = (characters) => `<div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>角色</th>${showNovel ? '<th>小说</th>' : ''}<th>性别/年龄</th><th>别名</th><th>台词</th><th>使用音色</th><th style="width:150px"></th></tr></thead>
+    <tbody>${characters.map((c) => {
+      const npc = isNpcCharacter(c);
+      const voices = npc ? (c.npc_voice ? [c.npc_voice] : []) : (c.voices || []);
+      return `<tr data-cid="${c.id}">
+      <td><span class="dot" style="background:${c.is_narrator ? 'var(--narr)' : colorOfName(c.name)}"></span> <b>${esc(c.name)}</b>${npc ? ' <span class="tag">NPC</span>' : ''}${c.description ? `<div class="small muted" style="max-width:260px">${esc(c.description)}</div>` : ''}</td>
       ${showNovel ? `<td class="small">${esc(c.novel_title || '通用')}</td>` : ''}
-      <td>${genderTag(c.gender)} <span class="small muted">${AGE[c.age || ''] || ''}</span></td>
+      <td>${genderTag(npc ? npcGender(c) : c.gender)} <span class="small muted">${esc(AGE[c.age || ''] || '')}</span></td>
       <td class="small muted" style="max-width:180px">${esc(c.aliases || '')}</td>
-      <td>${c.line_count}</td>
-      <td><div class="row" style="gap:4px">${c.voices.map((v) => `<span class="chip ${v.is_default ? 'def' : ''}" title="${esc(v.voice_id)}">${v.is_default ? '★ ' : ''}${esc(v.name)}<button class="icon" data-cplay="${esc(v.voice_id)}" data-speed="${v.speed}" data-vol="${v.vol}" data-pitch="${v.pitch}">▶</button></span>`).join('') || '<span class="tag warn">未绑定</span>'}</div></td>
+      <td>${Number(c.line_count) || 0}</td>
+      <td><div class="row" style="gap:4px">${voices.map((v) => `<span class="chip ${!npc && v.is_default ? 'def' : ''}" title="${esc(v.voice_id)}">${!npc && v.is_default ? '★ ' : ''}${esc(v.name || v.voice_id)}<button class="icon" data-cplay="${esc(v.voice_id)}" data-speed="${esc(v.speed ?? 1)}" data-vol="${esc(v.vol ?? 1)}" data-pitch="${esc(v.pitch ?? 0)}">▶</button></span>`).join('') || `<span class="tag warn">${npc ? '待集合分配' : '未绑定'}</span>`}</div></td>
       <td><div class="row" style="gap:4px;justify-content:flex-end">
-        <button class="btn sm" data-cbind>选音色</button>
+        ${npc ? '<button class="btn sm" data-cpool>管理集合</button>' : '<button class="btn sm" data-cbind>选音色</button>'}
         <button class="btn sm" data-cedit>编辑</button>
         ${c.is_narrator ? '' : '<button class="btn sm" data-cmerge title="合并到另一个角色">合并</button>'}
       </div></td>
-    </tr>`).join('')}</tbody></table></div>`;
+    </tr>`;
+    }).join('')}</tbody></table></div>`;
+  const named = list.filter((c) => !isNpcCharacter(c));
+  return `${named.length ? table(named) : ''}${['male', 'female'].map((gender) => {
+    const npcs = list.filter((c) => isNpcCharacter(c) && npcGender(c) === gender);
+    if (!npcs.length) return '';
+    const assigned = npcs.filter((c) => c.npc_voice).length;
+    return `<details class="panel" data-npc-group="${gender}" ${openNpcGroups.includes(gender) ? 'open' : ''} style="margin-top:14px"><summary style="cursor:pointer"><b>${gender === 'male' ? '男 NPC' : '女 NPC'}（${npcs.length}）</b><span class="small muted"> · 已配音色 ${assigned}/${npcs.length} · 展开查看原名与编辑</span></summary><div style="margin-top:12px">${table(npcs)}</div></details>`;
+  }).join('')}`;
 }
 function colorOfName(name) {
   let h = 0;
@@ -252,11 +381,14 @@ export function bindCharacterTable(root, getList, refresh) {
     const tr = e.target.closest('[data-cid]');
     if (!tr) return;
     const c = getList().find((x) => x.id === Number(tr.dataset.cid));
+    if (!c) return;
     const pl = e.target.closest('[data-cplay]');
     if (pl) return previewVoice(pl.dataset.cplay, pl, { title: c.name, speed: Number(pl.dataset.speed), vol: Number(pl.dataset.vol), pitch: Number(pl.dataset.pitch) });
     if (e.target.closest('[data-cedit]')) return openCharacterModal(c.id, { novelId: c.novel_id, onSaved: refresh });
+    if (e.target.closest('[data-cpool]')) return openNpcPoolManager({ novelId: c.novel_id, onChanged: refresh });
     if (e.target.closest('[data-cbind]')) {
-      const def = c.voices.find((v) => v.is_default);
+      if (isNpcCharacter(c)) return openCharacterModal(c.id, { novelId: c.novel_id, onSaved: refresh });
+      const def = (c.voices || []).find((v) => v.is_default);
       return openVoicePicker({
         title: `为「${c.name}」选择默认音色`,
         currentId: def?.id,

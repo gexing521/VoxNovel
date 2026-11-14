@@ -37,7 +37,7 @@ export function validateIdentities(raw, chapters) {
     }
     const existing = characters.find(x => x.name === name);
     if (existing) { existing.aliases.push(...aliases); existing.evidence.push(...evidence); }
-    else characters.push({ name, gender: /^(male|男)$/.test(c.gender) ? 'male' : /^(female|女)$/.test(c.gender) ? 'female' : '', age: ({ '青年': 'young', '成年': 'young', '中年': 'middle', '老年': 'old', '儿童': 'child' })[c.age] || (['child', 'young', 'middle', 'old'].includes(c.age) ? c.age : ''), description: typeof c.description === 'string' ? c.description.slice(0, 1500) : '', confidence: Number(c.confidence), aliases, evidence });
+    else characters.push({ name, is_named: typeof c.is_named === 'boolean' ? c.is_named : undefined, gender: /^(male|男)$/.test(c.gender) ? 'male' : /^(female|女)$/.test(c.gender) ? 'female' : '', age: ({ '青年': 'young', '成年': 'young', '中年': 'middle', '老年': 'old', '儿童': 'child' })[c.age] || (['child', 'young', 'middle', 'old'].includes(c.age) ? c.age : ''), description: typeof c.description === 'string' ? c.description.slice(0, 1500) : '', confidence: Number(c.confidence), aliases, evidence });
   }
   const owners = new Map();
   for (const c of characters) for (const a of c.aliases) for (const id of a.chapter_ids) {
@@ -73,7 +73,7 @@ export async function analyzeIdentities(chapters, settings, { onProgress, signal
   }
   if (current.length) batches.push(current);
   const observations = [];
-  const outputFormat = '\n【输出格式】只输出 JSON 对象，第一个字符必须是 {，必须使用英文键 characters（数组）和 unresolved（数组）。characters 每项包含 name, gender, age, description, confidence, aliases:[{name,chapter_ids}], evidence:[{chapter_id,quote}]。不要输出表格、列表、解释或代码块。';
+  const outputFormat = '\n【输出格式】只输出 JSON 对象，第一个字符必须是 {，必须使用英文键 characters（数组）和 unresolved（数组）。characters 每项包含 name, is_named（布尔值）, gender, age, description, confidence, aliases:[{name,chapter_ids}], evidence:[{chapter_id,quote}]。不要输出表格、列表、解释或代码块。';
   const getResult = async (messages, scope) => {
     let raw = await request(settings, messages, { temperature: 0.1 });
     try { return validateIdentities(raw, scope); }

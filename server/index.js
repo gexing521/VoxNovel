@@ -15,6 +15,7 @@ import {
 import { streamZip } from './zip.js';
 import { fetchChapter } from './fetcher.js';
 import { getIdentityReport } from './identity.js';
+import { describeNpc, isNpc, npcVoice, assignNovelNpcs, listPools, assertIdle, invalidateCharacterAudio } from './npc.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -184,8 +185,18 @@ route('GET', '/api/novels/:id', (req, res, { id }) => {
   return n;
 });
 route('PUT', '/api/novels/:id', (req, res, { id }, body) => {
-  updateFields('novels', id, body, ['title', 'author', 'description']);
-  return q.get('SELECT * FROM novels WHERE id = ?', id);
+  q.get('SELECT id FROM novels WHERE id = ?', id) || notFound();
+  return tx(() => {
+    if ('npc_pool_id' in body) {
+      assertIdle(Number(id));
+      if (body.npc_pool_id !== null && (!Number.isSafeInteger(body.npc_pool_id) || !q.get('SELECT id FROM npc_pools WHERE id = ?', body.npc_pool_id))) bad('NPC 音色合集不存在');
+      q.run('UPDATE novels SET npc_pool_id = ? WHERE id = ?', body.npc_pool_id, id);
+      // 更换合集时更新声音；清空某一性别的合集时允许保存，生成前会明确提示。
+      for (const c of q.all('SELECT * FROM characters WHERE novel_id = ?', id).filter(isNpc)) npcVoice(c, { strict: false });
+    }
+    updateFields('novels', id, body, ['title', 'author', 'description']);
+    return q.get('SELECT * FROM novels WHERE id = ?', id);
+  });
 });
 route('DELETE', '/api/novels/:id', (req, res, { id }) => {
   q.run('DELETE FROM novels WHERE id = ?', id);
@@ -202,6 +213,11 @@ route('POST', '/api/novels/:id/split', (req, res, { id }, body) => {
     ids = q.all(`SELECT id FROM chapters WHERE novel_id = ? ${body.onlyNew ? "AND split_status != 'done'" : ''} ORDER BY idx`, id).map((r) => r.id);
   }
   return { jobId: startSplit(ids, { mode: body.mode, reconcile: body.reconcile }) };
+});
+route('POST', '/api/novels/:id/npc-assign', (req, res, { id }, body) => {
+  q.get('SELECT id FROM novels WHERE id = ?', id) || notFound();
+  assertIdle(Number(id));
+  return assignNovelNpcs(Number(id), { reroll: body.reroll === true });
 });
 route('GET', '/api/novels/:id/identities', (req, res, { id }) => {
   q.get('SELECT id FROM novels WHERE id = ?', id) || notFound();
@@ -339,7 +355,7 @@ function characterList(novelId) {
   const map = {};
   for (const b of binds) (map[b.character_id] ||= []).push({ id: b.voice_id, voice_id: b.vid, name: b.vname, gender: b.vgender, is_default: b.is_default, speed: b.speed, vol: b.vol, pitch: b.pitch });
   for (const r of rows) r.voices = map[r.id] || [];
-  return rows;
+  return rows.map(describeNpc);
 }
 route('GET', '/api/characters', (req, res, p, body, url) => {
   let list = characterList(url.searchParams.get('novel_id') ? Number(url.searchParams.get('novel_id')) : null);
@@ -350,15 +366,30 @@ route('GET', '/api/characters', (req, res, p, body, url) => {
 route('POST', '/api/characters', (req, res, p, body) => {
   if (!body.name?.trim()) bad('请填写角色名');
   if (body.novel_id && findCharacterByName(body.novel_id, body.name.trim())) bad('该小说中已存在同名角色');
-  const id = q.run('INSERT INTO characters(novel_id, name, aliases, gender, age, description) VALUES (?, ?, ?, ?, ?, ?)',
-    body.novel_id || null, body.name.trim(), body.aliases || '', body.gender || '', body.age || '', body.description || '').id;
-  return q.get('SELECT * FROM characters WHERE id = ?', id);
+  validateRoleType(body);
+  if (body.novel_id) assertIdle(Number(body.novel_id));
+  const id = q.run('INSERT INTO characters(novel_id, name, aliases, gender, age, description, role_type) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    body.novel_id || null, body.name.trim(), body.aliases || '', body.gender || '', body.age || '', body.description || '', body.role_type || 'auto').id;
+  npcVoice(q.get('SELECT * FROM characters WHERE id = ?', id), { strict: false });
+  return describeNpc(q.get('SELECT * FROM characters WHERE id = ?', id));
 });
+function validateRoleType(body) {
+  if ('role_type' in body && !['auto', 'named', 'npc'].includes(body.role_type)) bad('角色类型无效');
+  if ('gender' in body && !['', 'male', 'female'].includes(body.gender)) bad('性别无效');
+}
 route('PUT', '/api/characters/:id', (req, res, { id }, body) => {
   const c = q.get('SELECT * FROM characters WHERE id = ?', id) || notFound();
-  updateFields('characters', id, body, ['name', 'aliases', 'gender', 'age', 'description']);
-  if (body.name && body.name !== c.name) q.run('UPDATE segments SET speaker = ? WHERE character_id = ?', body.name, id);
-  return q.get('SELECT * FROM characters WHERE id = ?', id);
+  validateRoleType(body);
+  if (['role_type', 'gender', 'name'].some(k => k in body)) assertIdle(c.novel_id);
+  return tx(() => {
+    updateFields('characters', id, body, ['name', 'aliases', 'gender', 'age', 'description', 'role_type']);
+    if (body.name && body.name !== c.name) q.run('UPDATE segments SET speaker = ? WHERE character_id = ?', body.name, id);
+    const fresh = q.get('SELECT * FROM characters WHERE id = ?', id);
+    if (isNpc(c) !== isNpc(fresh)) invalidateCharacterAudio(id);
+    if (isNpc(fresh)) npcVoice(fresh, { strict: false });
+    else q.run('DELETE FROM npc_assignments WHERE character_id = ?', id);
+    return describeNpc(fresh);
+  });
 });
 route('DELETE', '/api/characters/:id', (req, res, { id }) => {
   const c = q.get('SELECT * FROM characters WHERE id = ?', id) || notFound();
@@ -418,6 +449,54 @@ route('DELETE', '/api/characters/:id/voices/:vid', (req, res, { id, vid }) => {
   return { ok: true };
 });
 
+// --- NPC 音色合集 ---
+const requirePool = id => q.get('SELECT * FROM npc_pools WHERE id = ?', id) || notFound('NPC 音色合集不存在');
+const refreshNpcVoices = () => {
+  for (const c of q.all('SELECT * FROM characters WHERE is_narrator = 0').filter(isNpc)) npcVoice(c, { strict: false });
+};
+route('GET', '/api/npc-pools', () => listPools());
+route('POST', '/api/npc-pools', (req, res, p, body) => {
+  const name = String(body.name || '').trim();
+  if (!name || name.length > 80) bad('合集名称需为 1–80 个字符');
+  const id = q.run('INSERT INTO npc_pools(name) VALUES (?)', name).id;
+  return { id, name, voices: [] };
+});
+route('PUT', '/api/npc-pools/:id', (req, res, { id }, body) => {
+  requirePool(id);
+  const name = String(body.name || '').trim();
+  if (!name || name.length > 80) bad('合集名称需为 1–80 个字符');
+  q.run('UPDATE npc_pools SET name = ? WHERE id = ?', name, id);
+  return listPools().find(p => p.id === Number(id));
+});
+route('DELETE', '/api/npc-pools/:id', (req, res, { id }) => {
+  requirePool(id); assertIdle();
+  if (q.get('SELECT COUNT(*) n FROM npc_pools').n <= 1) bad('至少保留一个 NPC 音色合集');
+  return tx(() => {
+    for (const a of q.all('SELECT character_id FROM npc_assignments WHERE pool_id = ?', id)) invalidateCharacterAudio(a.character_id);
+    q.run('DELETE FROM npc_pools WHERE id = ?', id);
+    refreshNpcVoices();
+    return { ok: true };
+  });
+});
+route('POST', '/api/npc-pools/:id/voices', (req, res, { id }, body) => {
+  requirePool(id); assertIdle();
+  if (!['male', 'female'].includes(body.gender)) bad('请选择男 NPC 或女 NPC');
+  if (!q.get('SELECT id FROM voices WHERE id = ?', body.voice_db_id)) bad('音色不存在');
+  return tx(() => {
+    q.run('INSERT INTO npc_pool_voices(pool_id,voice_id,gender) VALUES (?,?,?) ON CONFLICT(pool_id,voice_id) DO UPDATE SET gender=excluded.gender', id, body.voice_db_id, body.gender);
+    refreshNpcVoices();
+    return { ok: true };
+  });
+});
+route('DELETE', '/api/npc-pools/:id/voices/:vid', (req, res, { id, vid }) => {
+  requirePool(id); assertIdle();
+  return tx(() => {
+    q.run('DELETE FROM npc_pool_voices WHERE pool_id = ? AND voice_id = ?', id, vid);
+    refreshNpcVoices();
+    return { ok: true };
+  });
+});
+
 // --- 音色 ---
 route('GET', '/api/voices', () =>
   q.all(`SELECT v.*, (SELECT COUNT(*) FROM character_voices cv WHERE cv.voice_id = v.id) AS bind_count,
@@ -436,7 +515,15 @@ route('PUT', '/api/voices/:id', (req, res, { id }, body) => {
   updateFields('voices', id, body, ['name', 'description', 'gender', 'tags', 'favorite']);
   return q.get('SELECT * FROM voices WHERE id = ?', id);
 });
-route('DELETE', '/api/voices/:id', (req, res, { id }) => { q.run('DELETE FROM voices WHERE id = ?', id); return { ok: true }; });
+route('DELETE', '/api/voices/:id', (req, res, { id }) => {
+  assertIdle();
+  return tx(() => {
+    for (const a of q.all('SELECT character_id FROM npc_assignments WHERE voice_id = ?', id)) invalidateCharacterAudio(a.character_id);
+    q.run('DELETE FROM voices WHERE id = ?', id);
+    refreshNpcVoices();
+    return { ok: true };
+  });
+});
 route('POST', '/api/voices/sync', async () => {
   const list = await fetchVoices(getSettings());
   let added = 0, updated = 0;

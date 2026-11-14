@@ -1,5 +1,6 @@
 import { q, tx, getSettings } from './db.js';
 import { analyzeIdentities, identityFingerprint, validateIdentities } from './identity-analysis.js';
+import { isNpc, npcVoice, invalidateCharacterAudio } from './npc.js';
 
 const names = text => String(text || '').split(/[,，、\s]+/).filter(Boolean);
 export const getIdentityReport = novelId => {
@@ -73,6 +74,9 @@ export function applyIdentityReport(novelId, input, chapters) {
       const allAliases = [...new Set([...aliases, ...candidates.flatMap(o => [o.name, ...names(o.aliases)])])].filter(a => a !== c.name);
       if (target.name !== c.name) renamed++;
       q.run('UPDATE characters SET name = ?,aliases = ?,gender = COALESCE(NULLIF(gender,\'\'),?),age = COALESCE(NULLIF(age,\'\'),?),description = ? WHERE id = ?', c.name, allAliases.join(','), c.gender, c.age, c.description, target.id);
+      if (typeof c.is_named === 'boolean') q.run('UPDATE characters SET role_hint = ? WHERE id = ?', c.is_named ? 'named' : 'npc', target.id);
+      const fresh = q.get('SELECT * FROM characters WHERE id = ?', target.id);
+      if (isNpc(target) !== isNpc(fresh)) invalidateCharacterAudio(target.id);
       for (const source of candidates) remaps.set(source.id, { id: target.id, name: c.name });
       // 保留目标默认音色；若目标没有音色则从最早的旧角色承接默认绑定。
       for (const source of candidates.filter(o => o.id !== target.id)) {
@@ -103,6 +107,10 @@ export function applyIdentityReport(novelId, input, chapters) {
       merged++;
     }
     for (const id of affected) q.run('UPDATE chapters SET merged_audio = NULL,merged_lrc = NULL,merged_duration_ms = NULL WHERE id = ?', id);
+    for (const c of q.all('SELECT * FROM characters WHERE novel_id = ?', novelId)) {
+      if (isNpc(c)) npcVoice(c, { strict: false });
+      else q.run('DELETE FROM npc_assignments WHERE character_id = ?', c.id);
+    }
     report.applied = { merged, renamed, updated_segments: updatedSegments };
     q.run('INSERT INTO identity_reports(novel_id,fingerprint,report_json) VALUES (?,?,?) ON CONFLICT(novel_id) DO UPDATE SET fingerprint=excluded.fingerprint,report_json=excluded.report_json', novelId, report.fingerprint, JSON.stringify(report));
   });

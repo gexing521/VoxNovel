@@ -10,6 +10,7 @@ import { guessAgeTag, isMandarinVoice } from './voices-seed.js';
 import { chatJson } from './llm.js';
 import { CASTING_SYSTEM, castingUserMessage } from './prompts.js';
 import { scopedCharacterByName, scopedCharacters, reconcileNovel } from './identity.js';
+import { isNpc, npcVoice, assignNovelNpcs, describeNpc } from './npc.js';
 
 export const AUDIO_DIR = path.join(DATA_DIR, 'audio');
 export const PREVIEW_DIR = path.join(DATA_DIR, 'previews');
@@ -47,6 +48,7 @@ const usedVoiceIds = (novelId) =>
 /** 规则分配：按性别、年龄，尽量不与本书已用音色重复 */
 export function autoAssignVoice(character) {
   if (character.is_narrator) return;
+  if (isNpc(character)) { npcVoice(character, { strict: false }); return; }
   if (q.get('SELECT 1 FROM character_voices WHERE character_id = ?', character.id)) return;
   const used = usedVoiceIds(character.novel_id);
   const age = character.age || 'young';
@@ -67,7 +69,7 @@ export function autoAssignVoice(character) {
 export async function aiCasting(novelId, settings, onProgress) {
   const chars = q.all(
     `SELECT c.* FROM characters c WHERE c.novel_id = ? AND c.is_narrator = 0
-       AND NOT EXISTS (SELECT 1 FROM character_voices cv WHERE cv.character_id = c.id) AND c.name NOT IN ('未知角色')`, novelId);
+       AND NOT EXISTS (SELECT 1 FROM character_voices cv WHERE cv.character_id = c.id) AND c.name NOT IN ('未知角色')`, novelId).filter(c => !isNpc(c));
   if (!chars.length) return;
   const pool = castingPool();
   const used = usedVoiceIds(novelId);
@@ -114,6 +116,11 @@ export function resolveVoice(seg, chapter) {
   let charId = seg.character_id;
   if (!charId || seg.type === 'narration') {
     if (seg.type === 'narration' || !charId) charId = ensureNarrator(chapter.novel_id).id;
+  }
+  const character = charId ? q.get('SELECT * FROM characters WHERE id = ?', charId) : null;
+  if (seg.type === 'dialogue' && isNpc(character)) {
+    const v = describeNpc(character).npc_voice;
+    return v ? { voice_id: v.voice_id, name: v.name, speed: 1, vol: 1, pitch: 0 } : null;
   }
   const pick = (cid) =>
     q.get(
@@ -193,6 +200,7 @@ export function startReconcile(novelId, { force = true } = {}) {
   const jobId = createJob('identity', `统一《${novel.title}》角色身份`, novelId, chapters.map(c => c.id), 1);
   return enqueue('split', jobId, async signal => {
     const report = await reconcileNovel(novelId, { force, signal, onProgress: message => jobUpdate(jobId, { message }) });
+    assignNovelNpcs(novelId, { strict: false });
     const settings = getSettings();
     if (settings.auto_assign_voice !== '0') {
       if (settings.ai_casting !== '0') await aiCasting(novelId, settings, message => jobUpdate(jobId, { message }));
@@ -260,12 +268,13 @@ export async function splitChapter(chapterId, { mode, signal, onProgress } = {})
     for (const k of known) {
       if (k._new) {
         if (findCharacterByName(chapter.novel_id, k.name)) continue;
-        q.run('INSERT INTO characters(novel_id, name, aliases, gender, age, description) VALUES (?, ?, ?, ?, ?, ?)', chapter.novel_id, k.name, k.aliases || '', k.gender || '', k.age || '', k.description || '');
+        q.run('INSERT INTO characters(novel_id, name, aliases, gender, age, description, role_hint) VALUES (?, ?, ?, ?, ?, ?, ?)', chapter.novel_id, k.name, k.aliases || '', k.gender || '', k.age || '', k.description || '', k.role_hint || '');
       } else if (k.id) {
         const existingAliases = q.get('SELECT aliases FROM characters WHERE id = ?', k.id)?.aliases || '';
         const aliases = [...new Set([existingAliases, k.aliases || ''].flatMap(a => a.split(/[,，、\s]+/)).filter(Boolean))].join(',');
         q.run(`UPDATE characters SET aliases = ?, gender = COALESCE(NULLIF(gender,''), ?), age = COALESCE(NULLIF(age,''), ?), description = COALESCE(NULLIF(description,''), ?) WHERE id = ?`, aliases, k.gender || '', k.age || '', k.description || '', k.id);
       }
+      if (k.id && k.role_hint) q.run('UPDATE characters SET role_hint = ? WHERE id = ?', k.role_hint, k.id);
     }
     // 删除旧片段与旧音频
     removeChapterAudio(chapter);
@@ -288,6 +297,7 @@ export async function splitChapter(chapterId, { mode, signal, onProgress } = {})
     q.run(`UPDATE chapters SET split_status = 'done', split_error = ? WHERE id = ?`, warnings.length ? warnings.join('\n') : null, chapterId);
   });
 
+  assignNovelNpcs(chapter.novel_id, { strict: false });
   if (settings.auto_assign_voice !== '0') {
     if (settings.ai_casting !== '0' && settings.llm_api_key && (mode || settings.split_mode) !== 'rule') await aiCasting(chapter.novel_id, settings, onProgress);
     for (const c of q.all('SELECT * FROM characters WHERE novel_id = ? AND is_narrator = 0', chapter.novel_id)) autoAssignVoice(c);
@@ -310,6 +320,7 @@ export function startGenerate(chapterIds, { force = false, segmentIds = null } =
   if (q.get("SELECT id FROM jobs WHERE novel_id = ? AND type IN ('identity','split') AND status IN ('queued','running')", novel.id)) throw new Error('本书正在拆分或统一角色身份，请结束后再生成音频');
   if (!settings.minimax_api_key) throw new Error('未配置 MiniMax API Key（设置 → 语音合成）');
 
+  assignNovelNpcs(novel.id);
   // 预检：对话角色是否都绑定了音色
   const plan = [];
   const missing = new Set();

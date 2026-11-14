@@ -119,6 +119,32 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 `);
 
+// ---- NPC 合集与兼容旧数据库的增量迁移 ----
+const addColumn = (table, name, definition) => {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+};
+addColumn('novels', 'npc_pool_id', 'INTEGER REFERENCES npc_pools(id) ON DELETE SET NULL');
+addColumn('characters', 'role_type', "TEXT NOT NULL DEFAULT 'auto'");
+addColumn('characters', 'role_hint', "TEXT NOT NULL DEFAULT ''");
+db.exec(`
+CREATE TABLE IF NOT EXISTS npc_pools (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS npc_pool_voices (
+  pool_id INTEGER NOT NULL REFERENCES npc_pools(id) ON DELETE CASCADE,
+  voice_id INTEGER NOT NULL REFERENCES voices(id) ON DELETE CASCADE,
+  gender TEXT NOT NULL CHECK(gender IN ('male','female')),
+  PRIMARY KEY(pool_id,voice_id)
+);
+CREATE TABLE IF NOT EXISTS npc_assignments (
+  character_id INTEGER PRIMARY KEY REFERENCES characters(id) ON DELETE CASCADE,
+  pool_id INTEGER NOT NULL REFERENCES npc_pools(id) ON DELETE CASCADE,
+  voice_id INTEGER NOT NULL REFERENCES voices(id) ON DELETE CASCADE,
+  gender TEXT NOT NULL CHECK(gender IN ('male','female'))
+);
+`);
+
 // ---- 参数归一化：node:sqlite 不接受 undefined / boolean ----
 const norm = (v) => (v === undefined ? null : typeof v === 'boolean' ? (v ? 1 : 0) : v);
 const normAll = (p) => p.map(norm);
@@ -214,6 +240,19 @@ export function publicSettings() {
     throw e;
   }
 })();
+
+// 默认合集只初始化一次；用户删减成员后重启不会重新补回。
+if (!q.get("SELECT 1 FROM settings WHERE key = '_npc_pools_initialized'")) {
+  tx(() => {
+    const pool = q.run('INSERT INTO npc_pools(name) VALUES (?)', '默认 NPC 音色合集').id;
+    const seed = ['male-qn-qingse', 'male-qn-jingying', 'male-qn-badao', 'male-qn-daxuesheng', 'Chinese (Mandarin)_Gentleman', 'Chinese (Mandarin)_Reliable_Executive', 'female-shaonv', 'female-yujie', 'female-chengshu', 'female-tianmei', 'Chinese (Mandarin)_Warm_Bestie', 'Chinese (Mandarin)_Wise_Women'];
+    for (const key of seed) {
+      const v = q.get('SELECT id,gender FROM voices WHERE voice_id = ?', key);
+      if (v) q.run('INSERT INTO npc_pool_voices(pool_id,voice_id,gender) VALUES (?,?,?)', pool, v.id, v.gender);
+    }
+    q.run("INSERT INTO settings(key,value) VALUES ('_npc_pools_initialized','1')");
+  });
+}
 
 // 服务重启时，未完成的任务标记为中断
 q.run(`UPDATE jobs SET status = 'interrupted', finished_at = datetime('now','localtime') WHERE status IN ('queued','running')`);

@@ -2,11 +2,12 @@
 // 针对 deepseek-v4.1-flash 调试：规则写清楚、给出判断优先级和输出示例、只输出 JSON。
 // 情绪取值随 TTS 模型变化（已对 MiniMax 实测：speech-2.8 不支持 whisper；speech-2.6 全部支持）。
 import { emotionsForModel } from './emotions.js';
-export const PROMPT_VERSION = 'v6-2026-11-14';
+export const PROMPT_VERSION = 'v7-npc-2026-11-14';
 
 const CHAR_RULES = `## characters 字段
 列出本批文本中所有说过话的角色，用于自动分配配音音色：
 - name：规范名（见命名规则）
+- is_named：必填布尔值；原文有姓名、专有名字或唯一专称时 true（如“方源”“花酒行者”），只有职业、外貌、关系、群体或编号称谓时 false（如“学堂家老”“舅母”“少年甲”）；沿用已知实名时 true。不可凭空为 NPC 编造名字
 - gender：必填，male / female / unknown 三选一。根据称呼（他/她、先生/女士、男人/女人、名字）推断，能推断就不要填 unknown
 - age：必填，child（儿童）/ young（少年、青年、二三十岁）/ middle（中年）/ old（老年）四选一，根据描述推断，无明显线索时填 young
 - aliases：本批文本中出现的该角色的其他称呼（昵称、头衔、全名/简称），不要包含“他/她/我”等代词
@@ -128,7 +129,7 @@ export function hybridUserMessage(known, pieces, batch, { before = 8, after = 3,
   for (let i = last + 1; i < Math.min(pieces.length, last + 1 + after); i++) lines.push(`[下文] ${pieces[i].type === 'dialogue' ? '“' + pieces[i].text + '”' : pieces[i].text}`);
   const ids = batch.filter((i) => pieces[i].type === 'dialogue');
   const skeleton = JSON.stringify({
-    characters: [{ name: '角色名', gender: 'male|female|unknown', age: 'child|young|middle|old', aliases: [], description: '一句话描述' }],
+    characters: [{ name: '角色名', is_named: true, gender: 'male|female|unknown', age: 'child|young|middle|old', aliases: [], description: '一句话描述' }],
     dialogues: ids.map((id) => ({ id, speaker: '说话人', emotion: emotionsForModel(model).join('|'), is_speech: true })),
   });
   return `【已知角色】\n${knownCharsText(known)}\n\n【待标注文本】\n${lines.join('\n')}\n\n` +
@@ -140,7 +141,7 @@ export function hybridUserMessage(known, pieces, batch, { before = 8, after = 3,
 export function fullUserMessage(known, chunk, model = '') {
   return `【已知角色】\n${knownCharsText(known)}\n\n【小说原文】\n${chunk}\n\n` +
     `【输出】按系统说明拆分上面的原文，只输出 JSON 对象本身，第一个字符必须是 {，格式为：` +
-    `{"characters":[{"name":"角色名","gender":"male|female|unknown","age":"child|young|middle|old","aliases":[],"description":"一句话描述"}],"segments":[{"type":"narration","speaker":"","emotion":"","text":"原文"},{"type":"dialogue","speaker":"说话人","emotion":"${emotionsForModel(model).join('|')} 选一","text":"原文"}]}。不要输出表格、列表、解释或代码块。`;
+    `{"characters":[{"name":"角色名","is_named":true,"gender":"male|female|unknown","age":"child|young|middle|old","aliases":[],"description":"一句话描述"}],"segments":[{"type":"narration","speaker":"","emotion":"","text":"原文"},{"type":"dialogue","speaker":"说话人","emotion":"${emotionsForModel(model).join('|')} 选一","text":"原文"}]}。不要输出表格、列表、解释或代码块。`;
 }
 
 /** 输出格式不对时的纠正指令 */
