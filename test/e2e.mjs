@@ -43,6 +43,10 @@ const llm = http.createServer(async (req, res) => {
       dialogues,
     };
   }
+  if (user.startsWith('{')) {
+    const input=JSON.parse(user);
+    if (input.editable_narration) out={narration:input.editable_narration.map(s=>({id:s.id,text:s.text.slice(0,Math.max(1,Math.floor(s.text.length/2)))}))};
+  }
   res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '```json\n' + JSON.stringify(out) + '\n```' } }] }));
 });
 
@@ -226,6 +230,24 @@ try {
   assert(zr.ok && zip.readUInt32LE(0) === 0x04034b50 && zip.readUInt32LE(zip.length - 22) === 0x06054b50, `ZIP 下载（${(zip.length / 1024).toFixed(0)}KB）`);
   const audio = await fetch(`http://127.0.0.1:${APP_PORT}/files/${ch2.segments[0].audio_file}`, { headers: { Range: 'bytes=0-99' } });
   assert(audio.status === 206 && (await audio.arrayBuffer()).byteLength === 100, '音频 Range 请求');
+  const beforeCompression=await call('/chapters/'+ch2.id);
+  const originalDialogue=JSON.stringify(beforeCompression.segments.filter(s=>s.type==='dialogue'));
+  const originalNarration=beforeCompression.segments.filter(s=>s.type==='narration').map(s=>s.text);
+  const compressionJob=await waitJob((await call(`/chapters/${ch2.id}/compress-narration`,{})).jobId);
+  const afterCompression=await call('/chapters/'+ch2.id);
+  assert(compressionJob.status==='done' && afterCompression.compression_status==='done' && afterCompression.narration_after_chars<afterCompression.narration_before_chars,'单章压缩 API 与任务进度和字数统计正常');
+  assert(JSON.stringify(afterCompression.segments.filter(s=>s.type==='dialogue'))===originalDialogue,'HTTP 旁白压缩严格保留对白及其音频');
+  const backupBefore=await call('/chapters/'+ch2.id);
+  const invalidMerge=await fetch(`${base}/segments/${backupBefore.segments.at(-1).id}/merge-next`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  const backupAfter=await call('/chapters/'+ch2.id);
+  assert(invalidMerge.status===400 && backupAfter.has_narration_backup && backupAfter.compression_status==='done','失败的片段合并不删除旁白备份或压缩状态');
+  await call('/segments/'+backupAfter.segments[0].id,{text:backupAfter.segments[0].text},'PUT');
+  assert((await call('/chapters/'+ch2.id)).has_narration_backup,'保存未变文本不会清空原旁白备份');
+  const batchCompression=await waitJob((await call(`/novels/${novel.id}/compress-narration`,{onlyNew:true})).jobId);
+  assert(batchCompression.status==='done' && batchCompression.total===1,'全书批量压缩只选择未压缩的已拆分章节');
+  await call(`/chapters/${ch2.id}/restore-narration`,{});
+  const restored=await call('/chapters/'+ch2.id);
+  assert(JSON.stringify(restored.segments.filter(s=>s.type==='narration').map(s=>s.text))===JSON.stringify(originalNarration) && restored.compression_status==='none','恢复原旁白 API 精确恢复并重置状态');
   console.log(`\n全部通过（${ok} 项）。数据目录：${DATA}`);
 } catch (e) {
   console.error(e);

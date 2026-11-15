@@ -165,11 +165,26 @@ function openImport() {
   };
 }
 
+// ================= 旁白压缩 =================
+const compressionActive = (c) => ['queued', 'running'].includes(c.compression_status);
+const compressionEligible = (c) => c.split_status === 'done' && c.compression_status !== 'done' && !compressionActive(c);
+const COMPRESSION_HELP = '只精简旁白，对话逐字保留。面向视频解说，保留剧情、因果和关键细节；冗长旁白以压缩至原长约 50% 或以下为目标，具体以保住故事为准。原旁白会自动备份，可恢复；修改过的旁白和整章音频需要重新生成。';
+function compressionStatus(c) {
+  const status = c.compression_status || 'none';
+  const label = { none: '未压缩', queued: '压缩排队中', running: '压缩中…', done: '已压缩', error: '压缩失败' }[status] || status;
+  const tone = status === 'done' ? 'ok' : status === 'error' ? 'err' : compressionActive(c) ? 'warn' : '';
+  const before = Number(c.narration_before_chars), after = Number(c.narration_after_chars);
+  const metrics = status === 'done' && Number.isFinite(before) && Number.isFinite(after) && before > 0
+    ? `<div class="small muted">${before} → ${after} 字 · 保留 ${Math.round(after / before * 100)}%</div>` : '';
+  return `<span class="tag ${tone}"${c.compression_error ? ` title="${esc(c.compression_error)}"` : ''}>${esc(label)}</span>${metrics}`;
+}
+
 // ================= 小说详情 =================
 async function viewNovel(id) {
   let tab = sessionStorage.getItem('novelTab') || 'chapters';
   let n, chars, npcPools;
   let npcBusy = false;
+  let compressionBusy = false;
   const load = async () => {
     [n, chars, npcPools] = await Promise.all([api('/novels/' + id), api('/characters?novel_id=' + id), api('/npc-pools')]);
   };
@@ -180,6 +195,9 @@ async function viewNovel(id) {
     const total = n.chapters.reduce((a, c) => a + c.segment_count, 0);
     const unsplit = n.chapters.filter((c) => c.split_status !== 'done').length;
     const unbound = chars.filter((c) => !characterVoice(c) && c.line_count);
+    const uncompressed = n.chapters.filter(compressionEligible).length;
+    const compressed = n.chapters.filter((c) => c.compression_status === 'done').length;
+    const compressing = n.chapters.filter(compressionActive).length;
     view.innerHTML = `
       <div class="crumbs"><a href="#/novels">小说库</a> / ${esc(n.title)}</div>
       <div class="page-head">
@@ -188,6 +206,7 @@ async function viewNovel(id) {
         <div class="grow"></div>
         <button class="btn" data-import>+ 追加章节</button>
         <button class="btn" data-split-all ${unsplit ? '' : 'disabled'}>拆分未拆分章节（${unsplit}）</button>
+        <button class="btn" data-compress-all ${uncompressed && !compressing && !compressionBusy ? '' : 'disabled'}>压缩未压缩章节旁白（${uncompressed}）</button>
         <button class="btn" data-identities>统一角色身份</button>
         <button class="btn" data-identity-report>身份认定依据</button>
         <button class="btn primary" data-gen-all>一键生成全部</button>
@@ -198,13 +217,15 @@ async function viewNovel(id) {
         <div class="stats" style="margin-bottom:8px"><span><b>${n.chapters.length}</b> 章</span><span><b>${chars.length - 1}</b> 个角色</span><span>已生成 <b>${done}</b> / ${total} 个片段</span>
           ${unbound.length ? `<span class="tag warn">${unbound.length} 个角色待配音色：${esc(unbound.slice(0, 5).map((c) => c.name).join('、'))}${unbound.length > 5 ? '…' : ''}</span>` : ''}</div>
         <div class="progress ${total && done === total ? 'ok' : ''}"><i style="width:${total ? (done / total) * 100 : 0}%"></i></div>
+        <div class="small muted" style="margin-top:10px">旁白已压缩 ${compressed} 章${compressing ? ` · 压缩处理中 ${compressing} 章` : ''} · 可压缩 ${uncompressed} 章（仅统计已拆分章节）</div>
+        <p class="small muted" style="margin-bottom:0">${COMPRESSION_HELP}</p>
       </div>
       <div class="tabs"><button data-tab="chapters" class="${tab === 'chapters' ? 'active' : ''}">章节（${n.chapters.length}）</button><button data-tab="chars" class="${tab === 'chars' ? 'active' : ''}">角色与音色（${chars.length}）</button></div>
       <div data-body></div>`;
     const body = $('[data-body]', view);
     if (tab === 'chapters') {
       body.innerHTML = n.chapters.length ? `<div class="tbl-wrap"><table class="tbl">
-        <thead><tr><th style="width:50px">#</th><th>章节</th><th>字数</th><th>拆分</th><th style="width:220px">生成进度</th><th>整章</th><th style="width:250px"></th></tr></thead>
+        <thead><tr><th style="width:50px">#</th><th>章节</th><th>字数</th><th>拆分</th><th>旁白压缩</th><th style="width:220px">生成进度</th><th>整章</th><th style="width:250px"></th></tr></thead>
         <tbody>${n.chapters.map((c) => {
           const pct = c.segment_count ? (c.done_count / c.segment_count) * 100 : 0;
           const st = { none: '<span class="tag">未拆分</span>', queued: '<span class="tag warn">排队中</span>', running: '<span class="tag warn">拆分中…</span>', done: `<span class="tag ok">${c.segment_count} 段</span>`, error: `<span class="tag err" title="${esc(c.split_error)}">失败</span>` }[c.split_status] || c.split_status;
@@ -213,10 +234,12 @@ async function viewNovel(id) {
             <td><a href="#/chapter/${c.id}">${esc(c.title)}</a></td>
             <td class="muted">${c.length}</td>
             <td>${st}</td>
+            <td>${compressionStatus(c)}</td>
             <td><div class="row" style="gap:8px"><div class="progress ${pct === 100 ? 'ok' : ''}" style="flex:1"><i style="width:${pct}%"></i></div><span class="small muted">${c.done_count}/${c.segment_count}${c.error_count ? ` <span style="color:var(--err)">✕${c.error_count}</span>` : ''}</span></div></td>
             <td>${c.merged_audio ? `<button class="btn sm" data-play-merged>▶ ${fmtDur(c.merged_duration_ms)}</button>` : '<span class="muted small">—</span>'}</td>
             <td><div class="row" style="gap:4px;justify-content:flex-end">
               <button class="btn sm" data-split>${c.split_status === 'done' ? '重新拆分' : '拆分'}</button>
+              <button class="btn sm" data-compress ${c.split_status === 'done' && !compressionActive(c) && !compressionBusy ? '' : 'disabled'}>${c.compression_status === 'done' ? '重新压缩' : '压缩旁白'}</button>
               <button class="btn sm" data-gen ${c.split_status === 'done' ? '' : 'disabled'}>生成</button>
               <a class="btn sm" href="/api/chapters/${c.id}/download-merged" title="下载整章拼接 MP3 和 LRC" ${c.merged_audio && c.merged_lrc ? '' : 'aria-disabled="true" tabindex="-1" style="opacity:.5;pointer-events:none"'}>下载整章</a>
               <a class="btn sm" href="#/chapter/${c.id}">编辑</a>
@@ -308,6 +331,18 @@ async function viewNovel(id) {
     if (t.closest('[data-identities]')) return startJob(`/novels/${id}/reconcile`, {}, '正在结合已导入的全部章节统一角色身份');
     if (t.closest('[data-identity-report]')) return openIdentityReport(id, n.chapters);
     if (t.closest('[data-split-all]')) return openSplitDialog(`/novels/${id}/split`, { onlyNew: true }, refresh);
+    if (t.closest('[data-compress-all]')) {
+      const count = n.chapters.filter(compressionEligible).length;
+      if (!count || compressionBusy) return;
+      compressionBusy = true;
+      render();
+      try {
+        if (!(await confirmBox(`压缩本书 ${count} 个已拆分、未压缩章节的旁白？${COMPRESSION_HELP}`, { okText: '开始压缩旁白' }))) return;
+        await startJob(`/novels/${id}/compress-narration`, { onlyNew: true }, '旁白压缩任务已开始');
+        await load();
+      } finally { compressionBusy = false; render(); }
+      return;
+    }
     if (t.closest('[data-gen-all]')) {
       const force = await askForce();
       if (force === null) return;
@@ -322,6 +357,19 @@ async function viewNovel(id) {
       if (t.closest('[data-split]')) {
         if (c.split_status === 'done' && !(await confirmBox('重新拆分会覆盖本章所有片段的修改，并删除已生成的音频，确定？'))) return;
         return openSplitDialog(`/chapters/${cid}/split`, {}, refresh);
+      }
+      if (t.closest('[data-compress]')) {
+        if (c.split_status !== 'done' || compressionActive(c) || compressionBusy) return;
+        const force = c.compression_status === 'done';
+        compressionBusy = true;
+        render();
+        try {
+          const detail = force ? '将使用备份的原始旁白重新压缩，不会对已压缩文本累积精简。' : '';
+          if (!(await confirmBox(`${force ? '重新压缩' : '压缩'}「${c.title}」的旁白？${detail}${COMPRESSION_HELP}`, { okText: force ? '从原旁白重新压缩' : '开始压缩旁白' }))) return;
+          await startJob(`/chapters/${cid}/compress-narration`, force ? { force: true } : {}, '本章旁白压缩任务已开始');
+          await load();
+        } finally { compressionBusy = false; render(); }
+        return;
       }
       if (t.closest('[data-gen]')) return startJob(`/chapters/${cid}/generate`, {}, '生成任务已开始');
       if (t.closest('[data-play-merged]')) return player.play(fileUrl(c.merged_audio), c.title, n.title);
@@ -392,6 +440,7 @@ async function openSplitDialog(path, extra, after) {
 async function viewChapter(id) {
   let c;
   let showOriginal = false;
+  let restoreBusy = false;
   const load = async () => { c = await api('/chapters/' + id); };
   await load();
 
@@ -424,11 +473,13 @@ async function viewChapter(id) {
       <div class="page-head">
         <h1>${esc(c.title)}</h1><button class="icon" data-rename title="重命名">✎</button>
         <div class="grow"></div>
+        ${c.has_narration_backup ? `<button class="btn sm" data-restore-narration ${restoreBusy || compressionActive(c) ? 'disabled' : ''}>恢复原旁白</button>` : ''}
         ${c.prev ? `<a class="btn sm" href="#/chapter/${c.prev.id}">← 上一章</a>` : ''}${c.next ? `<a class="btn sm" href="#/chapter/${c.next.id}">下一章 →</a>` : ''}
       </div>
       <div class="editor">
         <div>
           ${c.split_error && c.split_status === 'done' ? `<div class="panel small" style="margin-bottom:10px;color:var(--warn);white-space:pre-wrap">${esc(c.split_error)}</div>` : ''}
+          ${c.compression_status && c.compression_status !== 'none' ? `<div class="panel small" style="margin-bottom:10px">${compressionStatus(c)}<p class="small muted" style="margin-bottom:0">${c.compression_status === 'done' ? '原旁白已备份；对话保持原样。更改过的旁白需要重新生成音频，可使用上方「恢复原旁白」。' : compressionActive(c) ? '正在处理旁白，请在任务页查看进度；对话保持原样。' : esc(c.compression_error || '旁白压缩未完成，可返回章节列表重试。')}</p></div>` : ''}
           ${c.split_status === 'error' ? `<div class="panel small" style="margin-bottom:10px;color:var(--err)">拆分失败：${esc(c.split_error)}</div>` : ''}
           ${['queued', 'running'].includes(c.split_status) ? '<div class="panel" style="margin-bottom:10px">⏳ 正在拆分，请稍候…（进度见「任务」）</div>' : ''}
           ${showOriginal ? `<div class="panel" style="white-space:pre-wrap;line-height:1.9;margin-bottom:12px"><div class="row" style="margin-bottom:8px"><b>原文</b><div style="flex:1"></div><button class="btn sm" data-save-orig>保存原文修改</button></div><textarea data-orig rows="20" style="width:100%">${esc(c.content)}</textarea></div>` : ''}
@@ -484,6 +535,17 @@ async function viewChapter(id) {
       const force = await askForce();
       if (force === null) return;
       return startJob(`/chapters/${id}/generate`, { force }, '生成任务已开始');
+    }
+    if (t.closest('[data-restore-narration]')) {
+      if (restoreBusy || !c.has_narration_backup || compressionActive(c)) return;
+      restoreBusy = true;
+      render();
+      try {
+        if (!(await confirmBox('恢复本章备份的原始旁白？对话不变，当前压缩旁白将被替换，受影响的旁白和整章音频需重新生成。请等待本书当前任务结束后操作。', { okText: '恢复原旁白' }))) return;
+        await guard(() => api(`/chapters/${id}/restore-narration`, { body: {} }), '已恢复原旁白，请重新生成受影响的音频');
+        await load();
+      } finally { restoreBusy = false; render(); }
+      return;
     }
     if (t.closest('[data-dl]')) return (location.href = `/api/chapters/${id}/download`);
     if (t.closest('[data-merged]')) return player.play(fileUrl(c.merged_audio), c.title + '（整章）', c.novel.title);

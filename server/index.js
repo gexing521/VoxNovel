@@ -10,12 +10,13 @@ import { chat, listModels } from './llm.js';
 import { guessGender } from './voices-seed.js';
 import {
   AUDIO_DIR, PREVIEW_DIR, ensureNarrator, startSplit, startGenerate, cancelJob, previewVoice,
-  removeChapterAudio, buildMerged, findCharacterByName, autoAssignVoice, resolveVoice, safeName, startReconcile,
+  removeChapterAudio, buildMerged, findCharacterByName, autoAssignVoice, resolveVoice, safeName, startReconcile, startCompressNarration,
 } from './jobs.js';
 import { streamZip } from './zip.js';
 import { fetchChapter } from './fetcher.js';
 import { getIdentityReport } from './identity.js';
 import { describeNpc, isNpc, npcVoice, assignNovelNpcs, listPools, assertIdle, invalidateCharacterAudio } from './npc.js';
+import { assertNotCompressing, resetCompression, restoreChapterNarration } from './narration.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -177,7 +178,7 @@ function insertChapters(novelId, content, autoDetect = true, title) {
 }
 route('GET', '/api/novels/:id', (req, res, { id }) => {
   const n = q.get('SELECT * FROM novels WHERE id = ?', id) || notFound();
-  n.chapters = q.all(`SELECT c.id, c.idx, c.title, c.split_status, c.split_error, c.merged_audio, c.merged_lrc, c.merged_duration_ms, LENGTH(c.content) AS length,
+  n.chapters = q.all(`SELECT c.id, c.idx, c.title, c.split_status, c.split_error, c.merged_audio, c.merged_lrc, c.merged_duration_ms, c.compression_status, c.compression_error, c.narration_before_chars, c.narration_after_chars, LENGTH(c.content) AS length,
       (SELECT COUNT(*) FROM segments s WHERE s.chapter_id = c.id) AS segment_count,
       (SELECT COUNT(*) FROM segments s WHERE s.chapter_id = c.id AND s.status = 'done') AS done_count,
       (SELECT COUNT(*) FROM segments s WHERE s.chapter_id = c.id AND s.status = 'error') AS error_count
@@ -199,11 +200,13 @@ route('PUT', '/api/novels/:id', (req, res, { id }, body) => {
   });
 });
 route('DELETE', '/api/novels/:id', (req, res, { id }) => {
+  assertNotCompressing(Number(id));
   q.run('DELETE FROM novels WHERE id = ?', id);
   fs.rmSync(path.join(AUDIO_DIR, `novel_${Number(id)}`), { recursive: true, force: true });
   return { ok: true };
 });
 route('POST', '/api/novels/:id/chapters', (req, res, { id }, body) => {
+  assertNotCompressing(Number(id));
   q.get('SELECT id FROM novels WHERE id = ?', id) || notFound();
   return { added: insertChapters(Number(id), body.content, body.autoDetect !== false, body.title) };
 });
@@ -213,6 +216,17 @@ route('POST', '/api/novels/:id/split', (req, res, { id }, body) => {
     ids = q.all(`SELECT id FROM chapters WHERE novel_id = ? ${body.onlyNew ? "AND split_status != 'done'" : ''} ORDER BY idx`, id).map((r) => r.id);
   }
   return { jobId: startSplit(ids, { mode: body.mode, reconcile: body.reconcile }) };
+});
+route('POST', '/api/novels/:id/compress-narration', (req,res,{id}) => {
+  q.get('SELECT id FROM novels WHERE id=?',id) || notFound();
+  const ids=q.all("SELECT id FROM chapters WHERE novel_id=? AND split_status='done' AND compression_status!='done' ORDER BY idx,id",id).map(c=>c.id);
+  return { jobId:startCompressNarration(ids) };
+});
+route('POST', '/api/chapters/:id/compress-narration', (req,res,{id},body) => ({jobId:startCompressNarration([Number(id)],{force:body.force===true})}));
+route('POST', '/api/chapters/:id/restore-narration', (req,res,{id}) => {
+  const c=q.get('SELECT * FROM chapters WHERE id=?',id) || notFound();
+  assertIdle(c.novel_id);
+  return restoreChapterNarration(c.id);
 });
 route('POST', '/api/novels/:id/npc-assign', (req, res, { id }, body) => {
   q.get('SELECT id FROM novels WHERE id = ?', id) || notFound();
@@ -241,6 +255,7 @@ route('GET', '/api/novels/:id/download', async (req, res, { id }) => {
 // --- 章节 ---
 route('GET', '/api/chapters/:id', (req, res, { id }) => {
   const c = q.get('SELECT * FROM chapters WHERE id = ?', id) || notFound();
+  c.has_narration_backup=!!q.get('SELECT 1 FROM narration_backups WHERE chapter_id=?',c.id);
   c.novel = q.get('SELECT id, title, author FROM novels WHERE id = ?', c.novel_id);
   c.segments = q.all('SELECT * FROM segments WHERE chapter_id = ? ORDER BY idx, id', id);
   const vcache = {};
@@ -257,11 +272,15 @@ route('GET', '/api/chapters/:id', (req, res, { id }) => {
   return c;
 });
 route('PUT', '/api/chapters/:id', (req, res, { id }, body) => {
+  const c=q.get('SELECT * FROM chapters WHERE id=?',id) || notFound();
+  assertNotCompressing(c.novel_id);
+  if ('content' in body && body.content !== c.content) resetCompression(c.id);
   updateFields('chapters', id, body, ['title', 'content', 'idx']);
   return q.get('SELECT id, title, idx FROM chapters WHERE id = ?', id);
 });
 route('DELETE', '/api/chapters/:id', (req, res, { id }) => {
   const c = q.get('SELECT * FROM chapters WHERE id = ?', id) || notFound();
+  assertNotCompressing(c.novel_id);
   removeChapterAudio(c);
   q.run('DELETE FROM chapters WHERE id = ?', id);
   return { ok: true };
@@ -270,7 +289,11 @@ route('POST', '/api/chapters/:id/split', (req, res, { id }, body) => ({ jobId: s
 route('POST', '/api/chapters/:id/generate', (req, res, { id }, body) => ({
   jobId: startGenerate([Number(id)], { force: !!body.force, segmentIds: body.segmentIds?.length ? body.segmentIds.map(Number) : null }),
 }));
-route('POST', '/api/chapters/:id/merge', (req, res, { id }) => ({ ok: buildMerged(Number(id)) }));
+route('POST', '/api/chapters/:id/merge', (req, res, { id }) => {
+  const c=q.get('SELECT * FROM chapters WHERE id=?',id) || notFound();
+  assertNotCompressing(c.novel_id);
+  return {ok:buildMerged(Number(id))};
+});
 route('GET', '/api/chapters/:id/download-merged', async (req, res, { id }) => {
   const c = q.get('SELECT * FROM chapters WHERE id = ?', id) || notFound();
   const n = q.get('SELECT * FROM novels WHERE id = ?', c.novel_id);
@@ -288,8 +311,10 @@ route('GET', '/api/chapters/:id/download', async (req, res, { id }) => {
 route('POST', '/api/chapters/:id/segments', (req, res, { id }, body) => {
   // 插入片段：after = 在哪个 idx 之后
   const c = q.get('SELECT * FROM chapters WHERE id = ?', id) || notFound();
+  assertNotCompressing(c.novel_id);
   const after = body.after == null ? -1 : Number(body.after);
   const r = tx(() => {
+    resetCompression(c.id);
     q.run('UPDATE segments SET idx = idx + 1 WHERE chapter_id = ? AND idx > ?', id, after);
     const ch = body.type === 'dialogue' && body.character_id ? q.get('SELECT * FROM characters WHERE id = ?', body.character_id) : null;
     return q.run('INSERT INTO segments(chapter_id, idx, type, character_id, speaker, text) VALUES (?, ?, ?, ?, ?, ?)',
@@ -303,6 +328,7 @@ route('POST', '/api/chapters/:id/segments', (req, res, { id }, body) => {
 route('PUT', '/api/segments/:id', (req, res, { id }, body) => {
   const s = q.get('SELECT * FROM segments WHERE id = ?', id) || notFound();
   const chapter = q.get('SELECT * FROM chapters WHERE id = ?', s.chapter_id);
+  assertNotCompressing(chapter.novel_id);
   const data = {};
   if (body.text != null) data.text = String(body.text);
   if (body.emotion != null) data.emotion = String(body.emotion);
@@ -321,7 +347,10 @@ route('PUT', '/api/segments/:id', (req, res, { id }, body) => {
     if (!ch || ch.is_narrator) Object.assign(data, { type: 'narration', character_id: null, speaker: '' });
     else Object.assign(data, { type: 'dialogue', character_id: ch.id, speaker: ch.name });
   }
-  updateFields('segments', id, data, ['text', 'emotion', 'voice_override', 'type', 'character_id', 'speaker']);
+  tx(()=>{
+    if (['text','type','speaker','character_id'].some(k=>k in data && data[k]!==s[k])) resetCompression(chapter.id);
+    updateFields('segments', id, data, ['text', 'emotion', 'voice_override', 'type', 'character_id', 'speaker']);
+  });
   invalidateMerged(s.chapter_id);
   const ns = q.get('SELECT * FROM segments WHERE id = ?', id);
   const v = resolveVoice(ns, chapter);
@@ -330,6 +359,8 @@ route('PUT', '/api/segments/:id', (req, res, { id }, body) => {
 });
 route('DELETE', '/api/segments/:id', (req, res, { id }) => {
   const s = q.get('SELECT * FROM segments WHERE id = ?', id) || notFound();
+  assertNotCompressing(q.get('SELECT novel_id FROM chapters WHERE id=?',s.chapter_id).novel_id);
+  resetCompression(s.chapter_id);
   for (const f of [s.audio_file, s.lrc_file]) if (f) fs.rmSync(path.join(AUDIO_DIR, f), { force: true });
   tx(() => {
     q.run('DELETE FROM segments WHERE id = ?', id);
@@ -340,8 +371,10 @@ route('DELETE', '/api/segments/:id', (req, res, { id }) => {
 });
 route('POST', '/api/segments/:id/merge-next', (req, res, { id }) => {
   const s = q.get('SELECT * FROM segments WHERE id = ?', id) || notFound();
+  assertNotCompressing(q.get('SELECT novel_id FROM chapters WHERE id=?',s.chapter_id).novel_id);
   const n = q.get('SELECT * FROM segments WHERE chapter_id = ? AND idx = ?', s.chapter_id, s.idx + 1) || bad('已经是最后一个片段');
   tx(() => {
+    resetCompression(s.chapter_id);
     q.run(`UPDATE segments SET text = ?, status = 'pending' WHERE id = ?`, s.text + (s.type === 'narration' ? '' : '') + n.text, s.id);
     q.run('DELETE FROM segments WHERE id = ?', n.id);
     q.run('UPDATE segments SET idx = idx - 1 WHERE chapter_id = ? AND idx > ?', s.chapter_id, n.idx);
@@ -403,9 +436,14 @@ route('PUT', '/api/characters/:id', (req, res, { id }, body) => {
 route('DELETE', '/api/characters/:id', (req, res, { id }) => {
   const c = q.get('SELECT * FROM characters WHERE id = ?', id) || notFound();
   if (c.is_narrator) bad('旁白角色不能删除');
-  q.run(`UPDATE segments SET type = 'narration', character_id = NULL, speaker = '' WHERE character_id = ?`, id);
-  q.run('DELETE FROM characters WHERE id = ?', id);
-  return { ok: true };
+  const chapters=q.all('SELECT DISTINCT ch.id,ch.novel_id FROM chapters ch JOIN segments s ON s.chapter_id=ch.id WHERE s.character_id=?',id);
+  for(const ch of chapters) assertNotCompressing(ch.novel_id);
+  return tx(()=>{
+    for(const ch of chapters) {resetCompression(ch.id);invalidateMerged(ch.id);}
+    q.run(`UPDATE segments SET type = 'narration', character_id = NULL, speaker = '',status='pending' WHERE character_id = ?`, id);
+    q.run('DELETE FROM characters WHERE id = ?', id);
+    return { ok: true };
+  });
 });
 route('POST', '/api/characters/:id/merge', (req, res, { id }, body) => {
   // 把当前角色合并到 target（台词、别名、音色绑定转移）

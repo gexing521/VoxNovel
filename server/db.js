@@ -126,6 +126,15 @@ const addColumn = (table, name, definition) => {
 addColumn('novels', 'npc_pool_id', 'INTEGER REFERENCES npc_pools(id) ON DELETE SET NULL');
 addColumn('characters', 'role_type', "TEXT NOT NULL DEFAULT 'auto'");
 addColumn('characters', 'role_hint', "TEXT NOT NULL DEFAULT ''");
+addColumn('chapters', 'compression_status', "TEXT NOT NULL DEFAULT 'none'");
+addColumn('chapters', 'compression_error', 'TEXT');
+addColumn('chapters', 'narration_before_chars', 'INTEGER');
+addColumn('chapters', 'narration_after_chars', 'INTEGER');
+db.exec(`CREATE TABLE IF NOT EXISTS narration_backups (
+  chapter_id INTEGER PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+  originals_json TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now','localtime'))
+)`);
 db.exec(`
 CREATE TABLE IF NOT EXISTS npc_pools (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -257,4 +266,5 @@ if (!q.get("SELECT 1 FROM settings WHERE key = '_npc_pools_initialized'")) {
 // 服务重启时，未完成的任务标记为中断
 q.run(`UPDATE jobs SET status = 'interrupted', finished_at = datetime('now','localtime') WHERE status IN ('queued','running')`);
 q.run(`UPDATE segments SET status = 'pending' WHERE status = 'running'`);
+q.run(`UPDATE chapters SET compression_status = 'error', compression_error = '服务重启，旁白压缩中断，可重试' WHERE compression_status IN ('queued','running')`);
 q.run(`UPDATE chapters SET split_status = 'error', split_error = '服务重启，拆分中断' WHERE split_status = 'running'`);

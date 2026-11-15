@@ -11,6 +11,7 @@ import { chatJson } from './llm.js';
 import { CASTING_SYSTEM, castingUserMessage } from './prompts.js';
 import { scopedCharacterByName, scopedCharacters, reconcileNovel } from './identity.js';
 import { isNpc, npcVoice, assignNovelNpcs, describeNpc, invalidateCharacterAudio } from './npc.js';
+import { compressChapterNarration, assertNotCompressing, resetCompression } from './narration.js';
 
 export const AUDIO_DIR = path.join(DATA_DIR, 'audio');
 export const PREVIEW_DIR = path.join(DATA_DIR, 'previews');
@@ -173,11 +174,11 @@ export function cancelJob(id) {
 
 // 简单串行队列：同一时间只跑一个拆分任务 + 一个生成任务，避免触发限流
 const queues = { split: Promise.resolve(), generate: Promise.resolve() };
-function enqueue(kind, jobId, fn) {
+function enqueue(kind, jobId, fn, onQueuedCancel) {
   const signal = { cancelled: false };
   running.set(jobId, signal);
   queues[kind] = queues[kind].then(async () => {
-    if (signal.cancelled) { jobFinish(jobId, 'cancelled', '已取消'); running.delete(jobId); return; }
+    if (signal.cancelled) { onQueuedCancel?.(); jobFinish(jobId, 'cancelled', '已取消'); running.delete(jobId); return; }
     jobUpdate(jobId, { status: 'running' });
     try {
       const msg = await fn(signal);
@@ -191,7 +192,45 @@ function enqueue(kind, jobId, fn) {
   return jobId;
 }
 
+export function startCompressNarration(chapterIds, { force = false } = {}) {
+  let chapters = [...new Set(chapterIds)].map(id => q.get('SELECT * FROM chapters WHERE id=?',id)).filter(Boolean).sort((a,b)=>a.idx-b.idx || a.id-b.id);
+  if (!chapters.length) throw new Error('没有可压缩的章节');
+  if (chapters.some(c=>c.novel_id!==chapters[0].novel_id)) throw new Error('一次只能压缩同一本小说');
+  const novel=q.get('SELECT * FROM novels WHERE id=?',chapters[0].novel_id);
+  if (q.get("SELECT id FROM jobs WHERE novel_id=? AND status IN ('queued','running')",novel.id)) throw new Error('本书有正在执行的任务，请结束或取消后再压缩旁白');
+  if (chapters.some(c=>c.split_status!=='done')) throw new Error('请先完成章节拆分，再压缩旁白');
+  chapters=chapters.filter(c=>force || c.compression_status!=='done');
+  if (!chapters.length) throw new Error('所选章节旁白均已压缩');
+  if (!getSettings().llm_api_key) throw new Error('未配置大语言模型 API Key');
+  const jobId=createJob('compress',`压缩《${novel.title}》${chapters.length} 章旁白`,novel.id,chapters.map(c=>c.id),chapters.length);
+  for(const c of chapters) q.run("UPDATE chapters SET compression_status='queued',compression_error=NULL WHERE id=?",c.id);
+  // 与拆分共用串行队列，避免增加模型并发。
+  return enqueue('split',jobId,async signal=>{
+    let done=0,failed=0,before=0,after=0;
+    for(const c of chapters) {
+      if(signal.cancelled) {
+        q.run("UPDATE chapters SET compression_status=?,compression_error=NULL WHERE id=? AND compression_status='queued'",c.compression_status,c.id);
+        continue;
+      }
+      q.run("UPDATE chapters SET compression_status='running' WHERE id=?",c.id);
+      try {
+        const r=await compressChapterNarration(c.id,{signal,onProgress:message=>jobUpdate(jobId,{message:`${c.title}：${message}`})});
+        done++;before+=r.before;after+=r.after;
+      } catch(e) {
+        if(signal.cancelled) q.run('UPDATE chapters SET compression_status=?,compression_error=NULL WHERE id=?',c.compression_status,c.id);
+        else { failed++;q.run('UPDATE chapters SET compression_status=?,compression_error=? WHERE id=?',c.compression_status==='done'?'done':'error',e.message,c.id); }
+      }
+      jobUpdate(jobId,{done,failed});
+    }
+    if(failed && !done) throw new Error(`旁白压缩失败 ${failed} 章，请查看章节错误信息`);
+    return `完成 ${done} 章，失败 ${failed} 章；旁白 ${before} → ${after} 字，对白保持原文`;
+  },()=>{
+    for(const c of chapters) q.run("UPDATE chapters SET compression_status=?,compression_error=NULL WHERE id=? AND compression_status='queued'",c.compression_status,c.id);
+  });
+}
+
 export function startReconcile(novelId, { force = true } = {}) {
+  assertNotCompressing(novelId);
   const novel = q.get('SELECT * FROM novels WHERE id = ?', novelId);
   if (!novel) throw new Error('小说不存在');
   const chapters = q.all('SELECT id FROM chapters WHERE novel_id = ? ORDER BY idx,id', novelId);
@@ -216,6 +255,7 @@ export function startSplit(chapterIds, { mode, reconcile } = {}) {
   const chapters = [...new Set(chapterIds)].map((id) => q.get('SELECT * FROM chapters WHERE id = ?', id)).filter(Boolean).sort((a,b) => a.idx - b.idx || a.id - b.id);
   if (!chapters.length) throw new Error('没有可拆分的章节');
   if (chapters.some(c => c.novel_id !== chapters[0].novel_id)) throw new Error('一次只能拆分同一本小说');
+  assertNotCompressing(chapters[0].novel_id);
   const novel = q.get('SELECT * FROM novels WHERE id = ?', chapters[0].novel_id);
   if (q.get("SELECT id FROM jobs WHERE novel_id = ? AND type = 'generate' AND status IN ('queued','running')", novel.id)) throw new Error('本书正在生成音频，请完成或取消生成后再拆分');
   const jobId = createJob('split', `拆分《${novel.title}》${chapters.length > 1 ? chapters.length + ' 章' : chapters[0].title}`, novel.id, chapters.map((c) => c.id), chapters.length);
@@ -257,6 +297,7 @@ export function startSplit(chapterIds, { mode, reconcile } = {}) {
 export async function splitChapter(chapterId, { mode, signal, onProgress } = {}) {
   const chapter = q.get('SELECT * FROM chapters WHERE id = ?', chapterId);
   if (!chapter) throw new Error('章节不存在');
+  assertNotCompressing(chapter.novel_id);
   q.run(`UPDATE chapters SET split_status = 'running', split_error = NULL WHERE id = ?`, chapterId);
   const settings = getSettings();
   ensureNarrator(chapter.novel_id);
@@ -283,6 +324,7 @@ export async function splitChapter(chapterId, { mode, signal, onProgress } = {})
         if (!isNpc(fresh)) q.run('DELETE FROM npc_assignments WHERE character_id = ?', k.id);
       }
     }
+    resetCompression(chapterId);
     // 删除旧片段与旧音频
     removeChapterAudio(chapter);
     q.run('DELETE FROM segments WHERE chapter_id = ?', chapterId);
@@ -322,6 +364,8 @@ export function removeChapterAudio(chapter) {
 export function startGenerate(chapterIds, { force = false, segmentIds = null } = {}) {
   const chapters = chapterIds.map((id) => q.get('SELECT * FROM chapters WHERE id = ?', id)).filter(Boolean);
   if (!chapters.length) throw new Error('没有可生成的章节');
+  if (chapters.some(c=>c.novel_id!==chapters[0].novel_id)) throw new Error('一次只能生成同一本小说');
+  assertNotCompressing(chapters[0].novel_id);
   const novel = q.get('SELECT * FROM novels WHERE id = ?', chapters[0].novel_id);
   const settings = getSettings();
   if (q.get("SELECT id FROM jobs WHERE novel_id = ? AND type IN ('identity','split') AND status IN ('queued','running')", novel.id)) throw new Error('本书正在拆分或统一角色身份，请结束后再生成音频');
