@@ -183,6 +183,7 @@ route('GET', '/api/novels/:id', (req, res, { id }) => {
       (SELECT COUNT(*) FROM segments s WHERE s.chapter_id = c.id AND s.narration_omitted=0 AND s.status = 'done') AS done_count,
       (SELECT COUNT(*) FROM segments s WHERE s.chapter_id = c.id AND s.narration_omitted=0 AND s.status = 'error') AS error_count
     FROM chapters c WHERE c.novel_id = ? ORDER BY c.idx, c.id`, id);
+  n.active_jobs=q.all("SELECT id,title,type,status,message,done,total FROM jobs WHERE novel_id=? AND status IN ('queued','running') ORDER BY id",id);
   return n;
 });
 route('PUT', '/api/novels/:id', (req, res, { id }, body) => {
@@ -255,6 +256,7 @@ route('GET', '/api/novels/:id/download', async (req, res, { id }) => {
 // --- 章节 ---
 route('GET', '/api/chapters/:id', (req, res, { id }) => {
   const c = q.get('SELECT * FROM chapters WHERE id = ?', id) || notFound();
+  c.active_jobs=q.all("SELECT id,title,type,status,message,done,total FROM jobs WHERE novel_id=? AND status IN ('queued','running') ORDER BY id",c.novel_id);
   c.has_narration_backup=!!q.get('SELECT 1 FROM narration_backups WHERE chapter_id=?',c.id);
   c.novel = q.get('SELECT id, title, author FROM novels WHERE id = ?', c.novel_id);
   c.segments = q.all('SELECT * FROM segments WHERE chapter_id = ? AND narration_omitted=0 ORDER BY idx, id', id);

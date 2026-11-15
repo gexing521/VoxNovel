@@ -368,7 +368,11 @@ export function startGenerate(chapterIds, { force = false, segmentIds = null } =
   assertNotCompressing(chapters[0].novel_id);
   const novel = q.get('SELECT * FROM novels WHERE id = ?', chapters[0].novel_id);
   const settings = getSettings();
-  if (q.get("SELECT id FROM jobs WHERE novel_id = ? AND type IN ('identity','split') AND status IN ('queued','running')", novel.id)) throw new Error('本书正在拆分或统一角色身份，请结束后再生成音频');
+  const blocker = q.get("SELECT id,title,type,status FROM jobs WHERE novel_id = ? AND type IN ('identity','split','compress','generate') AND status IN ('queued','running') ORDER BY id LIMIT 1", novel.id);
+  if(blocker) {
+    const e=new Error(`本书正在${({identity:'统一角色身份',split:'拆分章节',compress:'整合旁白',generate:'生成音频'})[blocker.type]}（任务 #${blocker.id}：${blocker.title}），请等待任务完成或取消后再生成音频`);
+    e.status=409;throw e;
+  }
   if (!settings.minimax_api_key) throw new Error('未配置 MiniMax API Key（设置 → 语音合成）');
 
   assignNovelNpcs(novel.id);

@@ -165,6 +165,12 @@ function openImport() {
   };
 }
 
+// 任务结束后由现有轮询自动刷新生成按钮。
+const generationBlocker = (book) => (book.active_jobs || []).find(j=>['identity','split','compress','generate'].includes(j.type));
+const generationWait = (book) => {
+  const j=generationBlocker(book);
+  return j ? `<div class="panel small" data-generation-wait style="margin-bottom:12px">正在处理：<a href="#/jobs">${esc(j.title)}（任务 #${j.id}）</a>。完成后生成按钮会自动恢复。${j.message ? `<div class="muted">${esc(j.message)}</div>` : ''}</div>` : '';
+};
 // ================= 视频旁白整合 =================
 const compressionActive = (c) => ['queued', 'running'].includes(c.compression_status);
 const VIDEO_NARRATION_VERSION = 'video-v2';
@@ -211,10 +217,11 @@ async function viewNovel(id) {
         <button class="btn" data-compress-all ${uncompressed && !compressing && !compressionBusy ? '' : 'disabled'}>整合未整合章节旁白（${uncompressed}）</button>
         <button class="btn" data-identities>统一角色身份</button>
         <button class="btn" data-identity-report>身份认定依据</button>
-        <button class="btn primary" data-gen-all>一键生成全部</button>
+        <button class="btn primary" data-gen-all ${generationBlocker(n) ? 'disabled' : ''}>一键生成全部</button>
         <button class="btn" data-dl>下载 ZIP</button>
         <button class="icon" data-del title="删除小说">🗑</button>
       </div>
+      ${generationWait(n)}
       <div class="panel" style="margin-bottom:16px">
         <div class="stats" style="margin-bottom:8px"><span><b>${n.chapters.length}</b> 章</span><span><b>${chars.length - 1}</b> 个角色</span><span>已生成 <b>${done}</b> / ${total} 个片段</span>
           ${unbound.length ? `<span class="tag warn">${unbound.length} 个角色待配音色：${esc(unbound.slice(0, 5).map((c) => c.name).join('、'))}${unbound.length > 5 ? '…' : ''}</span>` : ''}</div>
@@ -242,7 +249,7 @@ async function viewNovel(id) {
             <td><div class="row" style="gap:4px;justify-content:flex-end">
               <button class="btn sm" data-split>${c.split_status === 'done' ? '重新拆分' : '拆分'}</button>
               <button class="btn sm" data-compress ${c.split_status === 'done' && !compressionActive(c) && !compressionBusy ? '' : 'disabled'}>${compressionCurrent(c) ? '重新整合' : '整合旁白'}</button>
-              <button class="btn sm" data-gen ${c.split_status === 'done' ? '' : 'disabled'}>生成</button>
+              <button class="btn sm" data-gen ${c.split_status === 'done' && !generationBlocker(n) ? '' : 'disabled'}>生成</button>
               <a class="btn sm" href="/api/chapters/${c.id}/download-merged" title="下载整章拼接 MP3 和 LRC" ${c.merged_audio && c.merged_lrc ? '' : 'aria-disabled="true" tabindex="-1" style="opacity:.5;pointer-events:none"'}>下载整章</a>
               <a class="btn sm" href="#/chapter/${c.id}">编辑</a>
               <button class="icon" data-chdel title="删除章节">✕</button>
@@ -346,6 +353,7 @@ async function viewNovel(id) {
       return;
     }
     if (t.closest('[data-gen-all]')) {
+      if(generationBlocker(n)) return toast('请等待当前任务完成后再生成，进度见任务页');
       const force = await askForce();
       if (force === null) return;
       await startJob(`/novels/${id}/generate`, { force }, '生成任务已开始');
@@ -478,6 +486,7 @@ async function viewChapter(id) {
         ${c.has_narration_backup ? `<button class="btn sm" data-restore-narration ${restoreBusy || compressionActive(c) ? 'disabled' : ''}>恢复原旁白</button>` : ''}
         ${c.prev ? `<a class="btn sm" href="#/chapter/${c.prev.id}">← 上一章</a>` : ''}${c.next ? `<a class="btn sm" href="#/chapter/${c.next.id}">下一章 →</a>` : ''}
       </div>
+      ${generationWait(c)}
       <div class="editor">
         <div>
           ${c.split_error && c.split_status === 'done' ? `<div class="panel small" style="margin-bottom:10px;color:var(--warn);white-space:pre-wrap">${esc(c.split_error)}</div>` : ''}
@@ -491,7 +500,7 @@ async function viewChapter(id) {
           <div class="panel">
             <h3>操作</h3>
             <div class="settings-sec" style="gap:8px">
-              <button class="btn primary" data-gen ${c.segments.length ? '' : 'disabled'}>生成本章音频</button>
+              <button class="btn primary" data-gen ${c.segments.length && !generationBlocker(c) ? '' : 'disabled'}>生成本章音频</button>
               <button class="btn" data-split>${c.segments.length ? '重新拆分' : '拆分'}</button>
               <button class="btn" data-orig-toggle>${showOriginal ? '隐藏原文' : '查看/编辑原文'}</button>
               <button class="btn" data-dl ${done ? '' : 'disabled'}>下载本章 ZIP</button>
@@ -534,6 +543,7 @@ async function viewChapter(id) {
       return openSplitDialog(`/chapters/${id}/split`, {}, refresh);
     }
     if (t.closest('[data-gen]')) {
+      if(generationBlocker(c)) return toast('请等待当前任务完成后再生成，进度见任务页');
       const force = await askForce();
       if (force === null) return;
       return startJob(`/chapters/${id}/generate`, { force }, '生成任务已开始');
@@ -667,6 +677,9 @@ async function viewChapter(id) {
       const editing = document.activeElement?.matches?.('[data-text]');
       const fresh = await api('/chapters/' + id).catch(() => null);
       if (!fresh) return;
+      const blockerChanged=JSON.stringify(c.active_jobs || [])!==JSON.stringify(fresh.active_jobs || []);
+      if(blockerChanged && !editing){c=fresh;render();return;}
+      c.active_jobs=fresh.active_jobs;
       if (editing || fresh.segments.length === c.segments.length && fresh.split_status === c.split_status) {
         // 只更新状态
         c.merged_audio = fresh.merged_audio;

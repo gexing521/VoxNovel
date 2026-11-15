@@ -46,6 +46,7 @@ const llm = http.createServer(async (req, res) => {
   }
   if (user.startsWith('{')) {
     const input=JSON.parse(user);
+    if(input.editable_narration) await new Promise(r=>setTimeout(r,100));
     if (input.editable_narration) out=integrateNarration ? {narration:[{id:input.editable_narration[0].id,text:'雨夜，三人在咖啡馆相遇。'}],omitted_ids:input.editable_narration.slice(1).map(s=>s.id)} : {narration:input.editable_narration.map(s=>({id:s.id,text:s.text.slice(0,Math.max(1,Math.floor(s.text.length/2)))}))};
   }
   res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '```json\n' + JSON.stringify(out) + '\n```' } }] }));
@@ -235,7 +236,13 @@ try {
   const beforeCompression=await call('/chapters/'+ch2.id);
   const originalDialogue=JSON.stringify(beforeCompression.segments.filter(s=>s.type==='dialogue'));
   const originalNarration=beforeCompression.segments.filter(s=>s.type==='narration').map(s=>s.text);
-  const compressionJob=await waitJob((await call(`/chapters/${ch2.id}/compress-narration`,{})).jobId);
+  const compressionPending=await call(`/chapters/${ch2.id}/compress-narration`,{});
+  const busyNovel=await call('/novels/'+novel.id);
+  const busyChapter=await call('/chapters/'+ch2.id);
+  assert(busyNovel.active_jobs.some(j=>j.id===compressionPending.jobId) && busyChapter.active_jobs.some(j=>j.id===compressionPending.jobId),'小说与章节接口返回具体阻塞任务供生成按钮展示');
+  const blockedGeneration=await fetch(`${base}/novels/${novel.id}/generate`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  assert(blockedGeneration.status===409,'前置任务执行中生成全部返回409而非服务器500');
+  const compressionJob=await waitJob(compressionPending.jobId);
   const afterCompression=await call('/chapters/'+ch2.id);
   assert(compressionJob.status==='done' && afterCompression.compression_status==='done' && afterCompression.narration_after_chars<afterCompression.narration_before_chars,'单章压缩 API 与任务进度和字数统计正常');
   assert(JSON.stringify(afterCompression.segments.filter(s=>s.type==='dialogue'))===originalDialogue,'HTTP 旁白压缩严格保留对白及其音频');

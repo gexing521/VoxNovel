@@ -69,7 +69,7 @@ assert.throws(()=>startReconcile(novel),/正在生成音频/);checks++;console.l
 assert.throws(()=>startSplit([first.id],{mode:'rule',reconcile:false}),/正在生成音频/);checks++;console.log('✓ 规则拆分与关闭身份预分析时同样禁止和音频生成并发');
 q.run("UPDATE jobs SET status='done' WHERE id=?",generating);
 q.run("INSERT INTO jobs(type,novel_id,status) VALUES ('identity',?,'running')",novel);
-assert.throws(()=>startGenerate([first.id]),/正在拆分或统一角色身份/);checks++;console.log('✓ 身份统一期间禁止按旧角色生成音频');
+assert.throws(()=>startGenerate([first.id]),e=>e.status===409 && /统一角色身份/.test(e.message));checks++;console.log('✓ 身份统一期间返回409及具体任务信息，禁止按旧角色生成音频');
 const headingHtml = '<h1>第3章 有技术的人</h1><div id="chaptercontent">第3章 有技术嘚人<br>'+ '正文只有小说内容。'.repeat(30)+'</div>';
 check(!extractChapter(headingHtml).content.startsWith('第3章'),'移除正文里异体字不同的重复章节标题，防止重复分章');
 const third = { id:q.run('INSERT INTO chapters(novel_id,idx,title,content) VALUES (?,2,?,?)',novel,'第3章 另一个人','清冷女人走入另一个场景，身份尚未确定。').id,idx:2,title:'第3章 另一个人',content:'清冷女人走入另一个场景，身份尚未确定。' };
