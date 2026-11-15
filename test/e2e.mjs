@@ -16,6 +16,7 @@ const assert = (cond, msg) => { if (!cond) { console.error('✕ ' + msg); proces
 
 // ---------- mock LLM ----------
 const NAMES = ['林默', '苏晴', '老板'];
+let integrateNarration = false;
 const llm = http.createServer(async (req, res) => {
   let body = '';
   for await (const c of req) body += c;
@@ -45,7 +46,7 @@ const llm = http.createServer(async (req, res) => {
   }
   if (user.startsWith('{')) {
     const input=JSON.parse(user);
-    if (input.editable_narration) out={narration:input.editable_narration.map(s=>({id:s.id,text:s.text.slice(0,Math.max(1,Math.floor(s.text.length/2)))}))};
+    if (input.editable_narration) out=integrateNarration ? {narration:[{id:input.editable_narration[0].id,text:'雨夜，三人在咖啡馆相遇。'}],omitted_ids:input.editable_narration.slice(1).map(s=>s.id)} : {narration:input.editable_narration.map(s=>({id:s.id,text:s.text.slice(0,Math.max(1,Math.floor(s.text.length/2)))}))};
   }
   res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '```json\n' + JSON.stringify(out) + '\n```' } }] }));
 });
@@ -230,6 +231,7 @@ try {
   assert(zr.ok && zip.readUInt32LE(0) === 0x04034b50 && zip.readUInt32LE(zip.length - 22) === 0x06054b50, `ZIP 下载（${(zip.length / 1024).toFixed(0)}KB）`);
   const audio = await fetch(`http://127.0.0.1:${APP_PORT}/files/${ch2.segments[0].audio_file}`, { headers: { Range: 'bytes=0-99' } });
   assert(audio.status === 206 && (await audio.arrayBuffer()).byteLength === 100, '音频 Range 请求');
+  await waitJob((await call(`/chapters/${ch2.id}/generate`,{})).jobId);
   const beforeCompression=await call('/chapters/'+ch2.id);
   const originalDialogue=JSON.stringify(beforeCompression.segments.filter(s=>s.type==='dialogue'));
   const originalNarration=beforeCompression.segments.filter(s=>s.type==='narration').map(s=>s.text);
@@ -248,6 +250,22 @@ try {
   await call(`/chapters/${ch2.id}/restore-narration`,{});
   const restored=await call('/chapters/'+ch2.id);
   assert(JSON.stringify(restored.segments.filter(s=>s.type==='narration').map(s=>s.text))===JSON.stringify(originalNarration) && restored.compression_status==='none','恢复原旁白 API 精确恢复并重置状态');
+  integrateNarration=true;
+  await waitJob((await call(`/chapters/${ch2.id}/compress-narration`,{})).jobId);
+  const integrated=await call('/chapters/'+ch2.id);
+  assert(integrated.segments.filter(s=>s.type==='narration').length===1 && integrated.compression_version==='video-v2','视频整合把多段旁白合成一个场景过渡，省略段不出现在编辑和朗读列表');
+  assert(JSON.stringify(integrated.segments.filter(s=>s.type==='dialogue'))===originalDialogue,'场景旁白整合后对白音频和元数据原样保留');
+  const omittedId=beforeCompression.segments.filter(s=>s.type==='narration')[1].id;
+  const staleEdit=await fetch(`${base}/segments/${omittedId}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({speaker:'林默',text:'旧标签页的修改'})});
+  assert(staleEdit.status===409 && (await call('/chapters/'+ch2.id)).has_narration_backup,'旧标签页不能将省略旁白改成隐形对白，也不丢失备份');
+  const beforeVideoGenerate=wsCalls;
+  const generated=await waitJob((await call(`/chapters/${ch2.id}/generate`,{})).jobId);
+  const ready=await call('/chapters/'+ch2.id);
+  assert(generated.failed===0 && ready.merged_audio && ready.segments.every(s=>s.status==='done') && wsCalls-beforeVideoGenerate===1,'只生成整合后的一条旁白，省略段不生成音频也不阻碍整章拼接');
+  const summary=(await call('/novels/'+novel.id)).chapters.find(c=>c.id===ch2.id);
+  assert(summary.segment_count===ready.segments.length && summary.done_count===ready.segments.length,'章节统计排除省略段，与音频任务一致');
+  await call(`/chapters/${ch2.id}/restore-narration`,{});
+  assert((await call('/chapters/'+ch2.id)).segments.length===beforeCompression.segments.length,'还原时恢复所有省略旁白和原位置');
   console.log(`\n全部通过（${ok} 项）。数据目录：${DATA}`);
 } catch (e) {
   console.error(e);

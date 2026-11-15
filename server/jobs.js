@@ -199,7 +199,7 @@ export function startCompressNarration(chapterIds, { force = false } = {}) {
   const novel=q.get('SELECT * FROM novels WHERE id=?',chapters[0].novel_id);
   if (q.get("SELECT id FROM jobs WHERE novel_id=? AND status IN ('queued','running')",novel.id)) throw new Error('本书有正在执行的任务，请结束或取消后再压缩旁白');
   if (chapters.some(c=>c.split_status!=='done')) throw new Error('请先完成章节拆分，再压缩旁白');
-  chapters=chapters.filter(c=>force || c.compression_status!=='done');
+  chapters=chapters.filter(c=>force || c.compression_status!=='done' || c.compression_version!=='video-v2');
   if (!chapters.length) throw new Error('所选章节旁白均已压缩');
   if (!getSettings().llm_api_key) throw new Error('未配置大语言模型 API Key');
   const jobId=createJob('compress',`压缩《${novel.title}》${chapters.length} 章旁白`,novel.id,chapters.map(c=>c.id),chapters.length);
@@ -376,7 +376,7 @@ export function startGenerate(chapterIds, { force = false, segmentIds = null } =
   const plan = [];
   const missing = new Set();
   for (const c of chapters) {
-    let segs = q.all('SELECT * FROM segments WHERE chapter_id = ? ORDER BY idx', c.id);
+    let segs = q.all('SELECT * FROM segments WHERE chapter_id = ? AND narration_omitted=0 ORDER BY idx', c.id);
     if (segmentIds) segs = segs.filter((s) => segmentIds.includes(s.id));
     for (const s of segs) {
       const v = resolveVoice(s, c);
@@ -452,7 +452,7 @@ function stripTags(buf) {
 export function buildMerged(chapterId, novel, settings = getSettings()) {
   const chapter = q.get('SELECT * FROM chapters WHERE id = ?', chapterId);
   if (!chapter || settings.build_merged === '0') return false;
-  const segs = q.all('SELECT * FROM segments WHERE chapter_id = ? ORDER BY idx', chapterId);
+  const segs = q.all('SELECT * FROM segments WHERE chapter_id = ? AND narration_omitted=0 ORDER BY idx', chapterId);
   if (!segs.length || segs.some((s) => s.status !== 'done' || !s.audio_file)) return false;
   novel = novel || q.get('SELECT * FROM novels WHERE id = ?', chapter.novel_id);
   const bufs = [];

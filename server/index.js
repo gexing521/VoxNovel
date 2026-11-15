@@ -153,8 +153,8 @@ route('GET', '/api/novels', () =>
   q.all(`SELECT n.*,
     (SELECT COUNT(*) FROM chapters c WHERE c.novel_id = n.id) AS chapter_count,
     (SELECT COUNT(*) FROM characters ch WHERE ch.novel_id = n.id AND ch.is_narrator = 0) AS character_count,
-    (SELECT COUNT(*) FROM segments s JOIN chapters c ON c.id = s.chapter_id WHERE c.novel_id = n.id) AS segment_count,
-    (SELECT COUNT(*) FROM segments s JOIN chapters c ON c.id = s.chapter_id WHERE c.novel_id = n.id AND s.status = 'done') AS done_count,
+    (SELECT COUNT(*) FROM segments s JOIN chapters c ON c.id = s.chapter_id WHERE c.novel_id = n.id AND s.narration_omitted=0) AS segment_count,
+    (SELECT COUNT(*) FROM segments s JOIN chapters c ON c.id = s.chapter_id WHERE c.novel_id = n.id AND s.narration_omitted=0 AND s.status = 'done') AS done_count,
     (SELECT COALESCE(SUM(LENGTH(content)),0) FROM chapters c WHERE c.novel_id = n.id) AS char_count
     FROM novels n ORDER BY n.updated_at DESC, n.id DESC`)
 );
@@ -178,10 +178,10 @@ function insertChapters(novelId, content, autoDetect = true, title) {
 }
 route('GET', '/api/novels/:id', (req, res, { id }) => {
   const n = q.get('SELECT * FROM novels WHERE id = ?', id) || notFound();
-  n.chapters = q.all(`SELECT c.id, c.idx, c.title, c.split_status, c.split_error, c.merged_audio, c.merged_lrc, c.merged_duration_ms, c.compression_status, c.compression_error, c.narration_before_chars, c.narration_after_chars, LENGTH(c.content) AS length,
-      (SELECT COUNT(*) FROM segments s WHERE s.chapter_id = c.id) AS segment_count,
-      (SELECT COUNT(*) FROM segments s WHERE s.chapter_id = c.id AND s.status = 'done') AS done_count,
-      (SELECT COUNT(*) FROM segments s WHERE s.chapter_id = c.id AND s.status = 'error') AS error_count
+  n.chapters = q.all(`SELECT c.id, c.idx, c.title, c.split_status, c.split_error, c.merged_audio, c.merged_lrc, c.merged_duration_ms, c.compression_status, c.compression_version, c.compression_error, c.narration_before_chars, c.narration_after_chars, LENGTH(c.content) AS length,
+      (SELECT COUNT(*) FROM segments s WHERE s.chapter_id = c.id AND s.narration_omitted=0) AS segment_count,
+      (SELECT COUNT(*) FROM segments s WHERE s.chapter_id = c.id AND s.narration_omitted=0 AND s.status = 'done') AS done_count,
+      (SELECT COUNT(*) FROM segments s WHERE s.chapter_id = c.id AND s.narration_omitted=0 AND s.status = 'error') AS error_count
     FROM chapters c WHERE c.novel_id = ? ORDER BY c.idx, c.id`, id);
   return n;
 });
@@ -219,7 +219,7 @@ route('POST', '/api/novels/:id/split', (req, res, { id }, body) => {
 });
 route('POST', '/api/novels/:id/compress-narration', (req,res,{id}) => {
   q.get('SELECT id FROM novels WHERE id=?',id) || notFound();
-  const ids=q.all("SELECT id FROM chapters WHERE novel_id=? AND split_status='done' AND compression_status!='done' ORDER BY idx,id",id).map(c=>c.id);
+  const ids=q.all("SELECT id FROM chapters WHERE novel_id=? AND split_status='done' AND (compression_status!='done' OR compression_version!='video-v2') ORDER BY idx,id",id).map(c=>c.id);
   return { jobId:startCompressNarration(ids) };
 });
 route('POST', '/api/chapters/:id/compress-narration', (req,res,{id},body) => ({jobId:startCompressNarration([Number(id)],{force:body.force===true})}));
@@ -257,7 +257,7 @@ route('GET', '/api/chapters/:id', (req, res, { id }) => {
   const c = q.get('SELECT * FROM chapters WHERE id = ?', id) || notFound();
   c.has_narration_backup=!!q.get('SELECT 1 FROM narration_backups WHERE chapter_id=?',c.id);
   c.novel = q.get('SELECT id, title, author FROM novels WHERE id = ?', c.novel_id);
-  c.segments = q.all('SELECT * FROM segments WHERE chapter_id = ? ORDER BY idx, id', id);
+  c.segments = q.all('SELECT * FROM segments WHERE chapter_id = ? AND narration_omitted=0 ORDER BY idx, id', id);
   const vcache = {};
   for (const s of c.segments) {
     const v = resolveVoice(s, c);
@@ -327,6 +327,7 @@ route('POST', '/api/chapters/:id/segments', (req, res, { id }, body) => {
 // --- 片段 ---
 route('PUT', '/api/segments/:id', (req, res, { id }, body) => {
   const s = q.get('SELECT * FROM segments WHERE id = ?', id) || notFound();
+  if(s.narration_omitted) throw new HttpError(409,'该旁白已被视频整合省略，请刷新页面或先恢复原旁白');
   const chapter = q.get('SELECT * FROM chapters WHERE id = ?', s.chapter_id);
   assertNotCompressing(chapter.novel_id);
   const data = {};
@@ -359,6 +360,7 @@ route('PUT', '/api/segments/:id', (req, res, { id }, body) => {
 });
 route('DELETE', '/api/segments/:id', (req, res, { id }) => {
   const s = q.get('SELECT * FROM segments WHERE id = ?', id) || notFound();
+  if(s.narration_omitted) throw new HttpError(409,'该旁白已被视频整合省略，请刷新页面或先恢复原旁白');
   assertNotCompressing(q.get('SELECT novel_id FROM chapters WHERE id=?',s.chapter_id).novel_id);
   resetCompression(s.chapter_id);
   for (const f of [s.audio_file, s.lrc_file]) if (f) fs.rmSync(path.join(AUDIO_DIR, f), { force: true });
@@ -371,8 +373,9 @@ route('DELETE', '/api/segments/:id', (req, res, { id }) => {
 });
 route('POST', '/api/segments/:id/merge-next', (req, res, { id }) => {
   const s = q.get('SELECT * FROM segments WHERE id = ?', id) || notFound();
+  if(s.narration_omitted) throw new HttpError(409,'该旁白已被视频整合省略，请刷新页面或先恢复原旁白');
   assertNotCompressing(q.get('SELECT novel_id FROM chapters WHERE id=?',s.chapter_id).novel_id);
-  const n = q.get('SELECT * FROM segments WHERE chapter_id = ? AND idx = ?', s.chapter_id, s.idx + 1) || bad('已经是最后一个片段');
+  const n = q.get('SELECT * FROM segments WHERE chapter_id = ? AND narration_omitted=0 AND idx > ? ORDER BY idx,id LIMIT 1', s.chapter_id, s.idx) || bad('已经是最后一个片段');
   tx(() => {
     resetCompression(s.chapter_id);
     q.run(`UPDATE segments SET text = ?, status = 'pending' WHERE id = ?`, s.text + (s.type === 'narration' ? '' : '') + n.text, s.id);
@@ -609,7 +612,7 @@ route('DELETE', '/api/jobs', () => { q.run(`DELETE FROM jobs WHERE status NOT IN
 // --- 下载辅助 ---
 function chapterFiles(c, prefix) {
   const files = [];
-  for (const s of q.all(`SELECT * FROM segments WHERE chapter_id = ? AND status = 'done' ORDER BY idx`, c.id)) {
+  for (const s of q.all(`SELECT * FROM segments WHERE chapter_id = ? AND narration_omitted=0 AND status = 'done' ORDER BY idx`, c.id)) {
     if (s.audio_file) files.push({ name: prefix + path.basename(s.audio_file), path: path.join(AUDIO_DIR, s.audio_file) });
     if (s.lrc_file) files.push({ name: prefix + path.basename(s.lrc_file), path: path.join(AUDIO_DIR, s.lrc_file) });
   }

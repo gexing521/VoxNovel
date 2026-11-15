@@ -126,6 +126,8 @@ const addColumn = (table, name, definition) => {
 addColumn('novels', 'npc_pool_id', 'INTEGER REFERENCES npc_pools(id) ON DELETE SET NULL');
 addColumn('characters', 'role_type', "TEXT NOT NULL DEFAULT 'auto'");
 addColumn('characters', 'role_hint', "TEXT NOT NULL DEFAULT ''");
+addColumn('chapters', 'compression_version', "TEXT NOT NULL DEFAULT ''");
+addColumn('segments', 'narration_omitted', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('chapters', 'compression_status', "TEXT NOT NULL DEFAULT 'none'");
 addColumn('chapters', 'compression_error', 'TEXT');
 addColumn('chapters', 'narration_before_chars', 'INTEGER');

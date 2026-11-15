@@ -31,12 +31,24 @@ await compressChapterNarration(chapter,{request:async(s,m)=>{const b=JSON.parse(
 restoreChapterNarration(chapter);
 check(JSON.stringify(get().filter(s=>s.type==='narration').map(s=>s.text))===JSON.stringify(originalTexts),'恢复原旁白可精确还原初稿');
 check(JSON.stringify(get().filter(s=>s.type==='dialogue'))===dialogues,'恢复操作也不影响对白');
+await compressChapterNarration(chapter,{request:async(s,m)=>{
+ const b=JSON.parse(m[1].content);
+ check(b.chapter_context.filter(x=>x.type==='dialogue').length===2,'整章对白作为视频叙事骨架传给模型');
+ return {narration:[{id:ids[0],text:'雨中，林默问苏晴是否喜欢雨天，苏晴放下书。'}],omitted_ids:[ids[2]]};
+}});
+check(get().find(s=>s.id===ids[2]).narration_omitted===1 && get().find(s=>s.id===ids[2]).text==='','环境与动作可整合一句，冗余段落明确省略而非逐段缩句');
+check(JSON.stringify(get().filter(s=>s.type==='dialogue'))===dialogues,'整合并省略旁白时所有对白记录完全不变');
+assert.throws(()=>resetCompression(chapter),/先恢复原旁白/);
+check(!!q.get('SELECT 1 FROM narration_backups WHERE chapter_id=?',chapter),'省略后的原稿备份不会因文本编辑重置而丢失');
+restoreChapterNarration(chapter);
+check(get().filter(s=>s.type==='narration').every(s=>s.narration_omitted===0),'恢复后省略段落重新出现且原顺序不变');
 const signature=JSON.stringify(get());
 for(const [label,make] of [
  ['拒绝缺少旁白编号',b=>({narration:[{id:ids[0],text:'短文'}]})],
  ['拒绝试图改对白',b=>({narration:[{id:ids[1],text:'改对白'},{id:ids[2],text:'短文'}]})],
  ['拒绝空文本',b=>({narration:b.editable_narration.map(x=>({id:x.id,text:''}))})],
  ['拒绝重复编号',b=>({narration:b.editable_narration.map(x=>({id:ids[0],text:'短文'}))})],
+ ['拒绝把多段堆成长篇旁白',b=>({narration:b.editable_narration.map(x=>({id:x.id,text:'长'.repeat(101)}))})],
  ['拒绝扩写',b=>({narration:b.editable_narration.map(x=>({id:x.id,text:x.text.repeat(2)}))})]
 ]){
  await assert.rejects(compressChapterNarration(chapter,{request:async(s,m)=>make(JSON.parse(m[1].content))}));
@@ -63,6 +75,11 @@ try{
  const job=startCompressNarration([chapter]);
  for(let i=0;i<100;i++){if(['done','error','cancelled'].includes(q.get('SELECT status FROM jobs WHERE id=?',job).status))break;await new Promise(r=>setTimeout(r,10));}
  check(q.get('SELECT status FROM jobs WHERE id=?',job).status==='done','后台压缩任务完成并更新章节状态');
+ const legacy=q.run("INSERT INTO chapters(novel_id,idx,title,split_status,compression_status) VALUES (?,4,'旧版已压缩','done','done')",novel).id;
+ q.run("INSERT INTO segments(chapter_id,idx,type,text) VALUES (?,0,'narration','旧旁白正文')",legacy);
+ const legacyJob=startCompressNarration([legacy]);
+ for(let i=0;i<100;i++){if(q.get('SELECT status FROM jobs WHERE id=?',legacyJob).status==='done')break;await new Promise(r=>setTimeout(r,10));}
+ check(q.get('SELECT compression_version FROM chapters WHERE id=?',legacy).compression_version==='video-v2','旧版已缩句章节可直接进入新版视频整合');
  assert.throws(()=>startCompressNarration([chapter]),/均已压缩/);check(true,'重复批量压缩自动跳过已完成章');
  globalThis.fetch=async()=>new Response('{"error":"unavailable"}',{status:503});
  const retryJob=startCompressNarration([chapter],{force:true});
@@ -73,5 +90,15 @@ try{
  for(let i=0;i<100;i++){if(q.get('SELECT status FROM jobs WHERE id=?',cancelledJob).status==='cancelled')break;await new Promise(r=>setTimeout(r,10));}
  check(q.get('SELECT compression_status FROM chapters WHERE id=?',chapter).compression_status==='none','排队时取消恢复章节压缩状态');
 }finally{globalThis.fetch=oldFetch;}
+ const one=q.run("INSERT INTO chapters(novel_id,idx,title,split_status) VALUES (?,2,'整合跨段','done')",novel).id;
+ const short=q.run("INSERT INTO segments(chapter_id,idx,type,text) VALUES (?,0,'narration','雨夜。')",one).id;
+ const long=q.run("INSERT INTO segments(chapter_id,idx,type,text) VALUES (?,1,'narration','林默经过漫长等待，终于等到苏晴推门进来。')",one).id;
+ const combined='雨夜，林默终于等到苏晴到来。';
+ await compressChapterNarration(one,{request:async()=>({narration:[{id:short,text:combined}],omitted_ids:[long]})});
+ check(q.get('SELECT text FROM segments WHERE id=?',short).text===combined,'整合后的单条旁白可以长于原段，总量控制不限制跨段整合');
+ await compressChapterNarration(one,{request:async()=>({narration:[],omitted_ids:[short,long]})});
+ check(q.get('SELECT count(*) n FROM segments WHERE chapter_id=? AND narration_omitted=0',one).n===0,'可由画面完整表达的场景允许省略全部旁白');
+ restoreChapterNarration(one);
+ check(q.get('SELECT count(*) n FROM segments WHERE chapter_id=? AND narration_omitted=0',one).n===2,'全部省略的场景仍能完整恢复原旁白');
 check(q.get('PRAGMA integrity_check').integrity_check==='ok','数据库完整性正常');
 db.close();console.log(`全部通过（${checks} 项），${process.env.DATA_DIR}`);
