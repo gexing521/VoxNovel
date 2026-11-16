@@ -197,7 +197,11 @@ export function startCompressNarration(chapterIds, { force = false } = {}) {
   if (!chapters.length) throw new Error('没有可压缩的章节');
   if (chapters.some(c=>c.novel_id!==chapters[0].novel_id)) throw new Error('一次只能压缩同一本小说');
   const novel=q.get('SELECT * FROM novels WHERE id=?',chapters[0].novel_id);
-  if (q.get("SELECT id FROM jobs WHERE novel_id=? AND status IN ('queued','running')",novel.id)) throw new Error('本书有正在执行的任务，请结束或取消后再压缩旁白');
+  const blocker = q.get("SELECT id,title,type FROM jobs WHERE novel_id=? AND status IN ('queued','running') ORDER BY id LIMIT 1",novel.id);
+  if (blocker) {
+    const e = new Error(`本书有正在执行的任务（#${blocker.id}：${blocker.title}），请等待任务完成或取消后再整合旁白`);
+    e.status = 409; throw e;
+  }
   if (chapters.some(c=>c.split_status!=='done')) throw new Error('请先完成章节拆分，再压缩旁白');
   chapters=chapters.filter(c=>force || c.compression_status!=='done' || c.compression_version!=='video-v2');
   if (!chapters.length) throw new Error('所选章节旁白均已压缩');
