@@ -138,6 +138,6 @@ check(parseSplit,'模型返回不可解析 JSON 时也可自动缩小批次恢�
 restoreChapterNarration(large);
 let authCalls=0;
 await assert.rejects(compressChapterNarration(large,{request:async()=>{authCalls++;throw new Error('LLM 请求失败 HTTP 401');}}),/401/);
-check(authCalls===1,'鉴权失败直接停止，不触发拆批放大请求');
+check(authCalls>=1 && authCalls<=3,'鉴权失败后停止新批次，仅排空最多3个在途请求，不触发拆批放大请求');
 check(q.get('PRAGMA integrity_check').integrity_check==='ok','数据库完整性正常');
 db.close();console.log(`全部通过（${checks} 项），${process.env.DATA_DIR}`);

@@ -12,6 +12,7 @@ import { CASTING_SYSTEM, castingUserMessage } from './prompts.js';
 import { scopedCharacterByName, scopedCharacters, reconcileNovel } from './identity.js';
 import { isNpc, npcVoice, assignNovelNpcs, describeNpc, invalidateCharacterAudio } from './npc.js';
 import { compressChapterNarration, assertNotCompressing, resetCompression } from './narration.js';
+import { narrationWorkers } from './narration-queue.js';
 
 export const AUDIO_DIR = path.join(DATA_DIR, 'audio');
 export const PREVIEW_DIR = path.join(DATA_DIR, 'previews');
@@ -177,7 +178,8 @@ const queues = { split: Promise.resolve(), generate: Promise.resolve() };
 function enqueue(kind, jobId, fn, onQueuedCancel) {
   const signal = { cancelled: false };
   running.set(jobId, signal);
-  queues[kind] = queues[kind].then(async () => {
+  const previous = kind==='compress' ? Promise.resolve() : queues[kind];
+  const task = previous.then(async () => {
     if (signal.cancelled) { onQueuedCancel?.(); jobFinish(jobId, 'cancelled', '已取消'); running.delete(jobId); return; }
     jobUpdate(jobId, { status: 'running' });
     try {
@@ -189,6 +191,7 @@ function enqueue(kind, jobId, fn, onQueuedCancel) {
       running.delete(jobId);
     }
   });
+  if(kind!=='compress') queues[kind]=task;
   return jobId;
 }
 
@@ -197,10 +200,16 @@ export function startCompressNarration(chapterIds, { force = false } = {}) {
   if (!chapters.length) throw new Error('没有可压缩的章节');
   if (chapters.some(c=>c.novel_id!==chapters[0].novel_id)) throw new Error('一次只能压缩同一本小说');
   const novel=q.get('SELECT * FROM novels WHERE id=?',chapters[0].novel_id);
-  const blocker = q.get("SELECT id,title,type FROM jobs WHERE novel_id=? AND status IN ('queued','running') ORDER BY id LIMIT 1",novel.id);
+  const blocker = q.get("SELECT id,title,type FROM jobs WHERE novel_id=? AND type!='compress' AND status IN ('queued','running') ORDER BY id LIMIT 1",novel.id);
   if (blocker) {
     const e = new Error(`本书有正在执行的任务（#${blocker.id}：${blocker.title}），请等待任务完成或取消后再整合旁白`);
     e.status = 409; throw e;
+  }
+  const requestedIds=new Set(chapters.map(c=>c.id));
+  const overlap=q.all("SELECT chapter_ids FROM jobs WHERE novel_id=? AND type='compress' AND status IN ('queued','running')",novel.id)
+    .some(job=>JSON.parse(job.chapter_ids || '[]').some(id=>requestedIds.has(Number(id))));
+  if (overlap || chapters.some(c=>['queued','running'].includes(c.compression_status))) {
+    const e=new Error('所选章节已有旁白整合任务，请等待完成；可以同时整合其他章节'); e.status=409;throw e;
   }
   if (chapters.some(c=>c.split_status!=='done')) throw new Error('请先完成章节拆分，再压缩旁白');
   chapters=chapters.filter(c=>force || c.compression_status!=='done' || c.compression_version!=='video-v2');
@@ -208,24 +217,24 @@ export function startCompressNarration(chapterIds, { force = false } = {}) {
   if (!getSettings().llm_api_key) throw new Error('未配置大语言模型 API Key');
   const jobId=createJob('compress',`压缩《${novel.title}》${chapters.length} 章旁白`,novel.id,chapters.map(c=>c.id),chapters.length);
   for(const c of chapters) q.run("UPDATE chapters SET compression_status='queued',compression_error=NULL WHERE id=?",c.id);
-  // 与拆分共用串行队列，避免增加模型并发。
-  return enqueue('split',jobId,async signal=>{
+  // 每个任务同时处理两集；所有任务的模型请求共享全局并发上限。
+  return enqueue('compress',jobId,async signal=>{
     let done=0,failed=0,before=0,after=0;
-    for(const c of chapters) {
-      if(signal.cancelled) {
-        q.run("UPDATE chapters SET compression_status=?,compression_error=NULL WHERE id=? AND compression_status='queued'",c.compression_status,c.id);
-        continue;
-      }
+    const progress=new Map(), pending=new Set(chapters.map(c=>c.id));
+    const report=()=>jobUpdate(jobId,{done,failed,message:`已完成 ${done}/${chapters.length} 集，失败 ${failed} 集；${[...progress.values()].join('；')}`});
+    await narrationWorkers(chapters,2,async c=>{
+      pending.delete(c.id);
       q.run("UPDATE chapters SET compression_status='running' WHERE id=?",c.id);
       try {
-        const r=await compressChapterNarration(c.id,{signal,onProgress:message=>jobUpdate(jobId,{message:`${c.title}：${message}`})});
+        const r=await compressChapterNarration(c.id,{signal,onProgress:message=>{progress.set(c.id,`${c.title}：${message}`);report();}});
         done++;before+=r.before;after+=r.after;
       } catch(e) {
         if(signal.cancelled) q.run('UPDATE chapters SET compression_status=?,compression_error=NULL WHERE id=?',c.compression_status,c.id);
         else { failed++;q.run('UPDATE chapters SET compression_status=?,compression_error=? WHERE id=?',c.compression_status==='done'?'done':'error',e.message,c.id); }
       }
-      jobUpdate(jobId,{done,failed});
-    }
+      progress.delete(c.id);report();
+    },()=>signal.cancelled).catch(e=>{if(!signal.cancelled) throw e;});
+    for(const c of chapters.filter(c=>pending.has(c.id))) q.run("UPDATE chapters SET compression_status=?,compression_error=NULL WHERE id=? AND compression_status='queued'",c.compression_status,c.id);
     if(failed && !done) throw new Error(`旁白压缩失败 ${failed} 章，请查看章节错误信息`);
     return `完成 ${done} 章，失败 ${failed} 章；旁白 ${before} → ${after} 字，对白保持原文`;
   },()=>{

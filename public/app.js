@@ -167,9 +167,13 @@ function openImport() {
 
 // 任务结束后由现有轮询自动刷新生成按钮。
 const generationBlocker = (book) => (book.active_jobs || []).find(j=>['identity','split','compress','generate'].includes(j.type));
+const compressionBlocker = (book) => (book.active_jobs || []).find(j=>['identity','split','generate'].includes(j.type));
 const generationWait = (book) => {
-  const j=generationBlocker(book);
-  return j ? `<div class="panel small" data-generation-wait style="margin-bottom:12px">正在处理：<a href="#/jobs">${esc(j.title)}（任务 #${j.id}）</a>。完成后生成和旁白整合按钮会自动恢复。${j.message ? `<div class="muted">${esc(j.message)}</div>` : ''}</div>` : '';
+  const j=compressionBlocker(book) || generationBlocker(book);
+  const wait = j?.type === 'compress'
+    ? '其他未在处理的章节仍可整合旁白；生成音频需等待本书全部整合任务完成。'
+    : '完成后生成和旁白整合按钮会自动恢复。';
+  return j ? `<div class="panel small" data-generation-wait style="margin-bottom:12px">正在处理：<a href="#/jobs">${esc(j.title)}（任务 #${j.id}）</a>。${wait}${j.message ? `<div class="muted">${esc(j.message)}</div>` : ''}</div>` : '';
 };
 // ================= 视频旁白整合 =================
 const compressionActive = (c) => ['queued', 'running'].includes(c.compression_status);
@@ -214,7 +218,7 @@ async function viewNovel(id) {
         <div class="grow"></div>
         <button class="btn" data-import>+ 追加章节</button>
         <button class="btn" data-split-all ${unsplit ? '' : 'disabled'}>拆分未拆分章节（${unsplit}）</button>
-        <button class="btn" data-compress-all ${uncompressed && !compressing && !generationBlocker(n) && !compressionBusy ? '' : 'disabled'}>整合未整合章节旁白（${uncompressed}）</button>
+        <button class="btn" data-compress-all ${uncompressed && !compressionBlocker(n) && !compressionBusy ? '' : 'disabled'}>整合未整合章节旁白（${uncompressed}）</button>
         <button class="btn" data-identities>统一角色身份</button>
         <button class="btn" data-identity-report>身份认定依据</button>
         <button class="btn primary" data-gen-all ${generationBlocker(n) ? 'disabled' : ''}>一键生成全部</button>
@@ -248,7 +252,7 @@ async function viewNovel(id) {
             <td>${c.merged_audio ? `<button class="btn sm" data-play-merged>▶ ${fmtDur(c.merged_duration_ms)}</button>` : '<span class="muted small">—</span>'}</td>
             <td><div class="row" style="gap:4px;justify-content:flex-end">
               <button class="btn sm" data-split>${c.split_status === 'done' ? '重新拆分' : '拆分'}</button>
-              <button class="btn sm" data-compress ${c.split_status === 'done' && !compressionActive(c) && !generationBlocker(n) && !compressionBusy ? '' : 'disabled'}>${compressionCurrent(c) ? '重新整合' : '整合旁白'}</button>
+              <button class="btn sm" data-compress ${c.split_status === 'done' && !compressionActive(c) && !compressionBlocker(n) && !compressionBusy ? '' : 'disabled'}>${compressionCurrent(c) ? '重新整合' : '整合旁白'}</button>
               <button class="btn sm" data-gen ${c.split_status === 'done' && !generationBlocker(n) ? '' : 'disabled'}>生成</button>
               <a class="btn sm" href="/api/chapters/${c.id}/download-merged" title="下载整章拼接 MP3 和 LRC" ${c.merged_audio && c.merged_lrc ? '' : 'aria-disabled="true" tabindex="-1" style="opacity:.5;pointer-events:none"'}>下载整章</a>
               <a class="btn sm" href="#/chapter/${c.id}">编辑</a>
@@ -341,7 +345,7 @@ async function viewNovel(id) {
     if (t.closest('[data-identity-report]')) return openIdentityReport(id, n.chapters);
     if (t.closest('[data-split-all]')) return openSplitDialog(`/novels/${id}/split`, { onlyNew: true }, refresh);
     if (t.closest('[data-compress-all]')) {
-      if (generationBlocker(n)) return toast('请等待当前任务完成后再整合旁白，进度见任务页');
+      if (compressionBlocker(n)) return toast('请等待当前任务完成后再整合旁白，进度见任务页');
       const count = n.chapters.filter(compressionEligible).length;
       if (!count || compressionBusy) return;
       compressionBusy = true;
@@ -370,7 +374,7 @@ async function viewNovel(id) {
         return openSplitDialog(`/chapters/${cid}/split`, {}, refresh);
       }
       if (t.closest('[data-compress]')) {
-        if (generationBlocker(n)) return toast('请等待当前任务完成后再整合旁白，进度见任务页');
+        if (compressionBlocker(n)) return toast('请等待当前任务完成后再整合旁白，进度见任务页');
         if (c.split_status !== 'done' || compressionActive(c) || compressionBusy) return;
         const force = c.compression_status === 'done';
         compressionBusy = true;

@@ -220,7 +220,7 @@ route('POST', '/api/novels/:id/split', (req, res, { id }, body) => {
 });
 route('POST', '/api/novels/:id/compress-narration', (req,res,{id}) => {
   q.get('SELECT id FROM novels WHERE id=?',id) || notFound();
-  const ids=q.all("SELECT id FROM chapters WHERE novel_id=? AND split_status='done' AND (compression_status!='done' OR compression_version!='video-v2') ORDER BY idx,id",id).map(c=>c.id);
+  const ids=q.all("SELECT id FROM chapters WHERE novel_id=? AND split_status='done' AND compression_status NOT IN ('queued','running') AND (compression_status!='done' OR compression_version!='video-v2') ORDER BY idx,id",id).map(c=>c.id);
   return { jobId:startCompressNarration(ids) };
 });
 route('POST', '/api/chapters/:id/compress-narration', (req,res,{id},body) => ({jobId:startCompressNarration([Number(id)],{force:body.force===true})}));
