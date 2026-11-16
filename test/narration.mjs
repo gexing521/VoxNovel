@@ -100,5 +100,44 @@ try{
  check(q.get('SELECT count(*) n FROM segments WHERE chapter_id=? AND narration_omitted=0',one).n===0,'可由画面完整表达的场景允许省略全部旁白');
  restoreChapterNarration(one);
  check(q.get('SELECT count(*) n FROM segments WHERE chapter_id=? AND narration_omitted=0',one).n===2,'全部省略的场景仍能完整恢复原旁白');
+const large=q.run("INSERT INTO chapters(novel_id,idx,title,split_status) VALUES (?,5,'长集回归','done')",novel).id;
+for(let i=0;i<210;i++) {
+ q.run("INSERT INTO segments(chapter_id,idx,type,text) VALUES (?,?,?,?)",large,i*2,'narration','原始旁白描述场景变化，需要模型明确决定保留或省略。');
+ q.run("INSERT INTO segments(chapter_id,idx,type,text) VALUES (?,?,?,?)",large,i*2+1,'dialogue','对白不可修改。');
+}
+const largeRows=()=>q.all('SELECT * FROM segments WHERE chapter_id=? ORDER BY idx',large);
+const largeDialogue=JSON.stringify(largeRows().filter(s=>s.type==='dialogue'));
+let retryFeedback=false,splitSeen=false,maxBatch=0;
+await compressChapterNarration(large,{request:async(s,m)=>{
+ const b=JSON.parse(m[1].content),batch=b.editable_narration;maxBatch=Math.max(maxBatch,batch.length);
+ if(batch.length>48) {
+  if(m.length>2) retryFeedback ||= m.at(-1).content.includes('缺少') && m.at(-1).content.includes(String(batch.at(-1).id));
+  return {narration:[{id:batch[0].id,text:'场景变化。'}]};
+ }
+ splitSeen=true;
+ return {narration:[{id:batch[0].id,text:'场景变化。'}],omitted_ids:batch.slice(1).map(x=>x.id)};
+}});
+check(maxBatch===96 && splitSeen && retryFeedback,'长集每批最多96段；遗漏编号反馈明确，连续失败后拆小批次重试');
+check(JSON.stringify(largeRows().filter(s=>s.type==='dialogue'))===largeDialogue,'长集分批及拆小重试均完整保留对白');
+restoreChapterNarration(large);
+check(largeRows().filter(s=>s.type==='narration').every(s=>s.text.includes('原始旁白描述')),'长集整合结果可恢复全部原始旁白');
+const beforeFailure=JSON.stringify(largeRows());let validBatches=0;
+await assert.rejects(compressChapterNarration(large,{request:async(s,m)=>{
+ const b=JSON.parse(m[1].content);
+ if(b.editable_narration[0].id===largeRows()[0].id) {validBatches++;return {narration:[],omitted_ids:b.editable_narration.map(x=>x.id)};}
+ return {narration:[],omitted_ids:[]};
+}}),/缺少/);
+check(validBatches===1 && JSON.stringify(largeRows())===beforeFailure,'长集后续批次最终失败时，前面成功批次也不写入原稿');
+let parseSplit=false;
+await compressChapterNarration(large,{request:async(s,m)=>{
+ const b=JSON.parse(m[1].content);
+ if(b.editable_narration.length>48) throw new Error('无法解析 LLM 输出的 JSON：截断');
+ parseSplit=true;return {narration:[],omitted_ids:b.editable_narration.map(x=>x.id)};
+}});
+check(parseSplit,'模型返回不可解析 JSON 时也可自动缩小批次恢复');
+restoreChapterNarration(large);
+let authCalls=0;
+await assert.rejects(compressChapterNarration(large,{request:async()=>{authCalls++;throw new Error('LLM 请求失败 HTTP 401');}}),/401/);
+check(authCalls===1,'鉴权失败直接停止，不触发拆批放大请求');
 check(q.get('PRAGMA integrity_check').integrity_check==='ok','数据库完整性正常');
 db.close();console.log(`全部通过（${checks} 项），${process.env.DATA_DIR}`);

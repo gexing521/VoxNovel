@@ -56,25 +56,35 @@ export async function compressChapterNarration(chapterId, { signal, onProgress, 
   const batches=[];let batch=[],size=0;
   for(const s of snapshot) {
     const text=byId.get(s.id) ?? s.text;
-    if(size+text.length>18000 && batch.length){batches.push(batch);batch=[];size=0;}
+    if((size+text.length>12000 || (s.type==='narration' && batch.length>=96)) && batch.length){batches.push(batch);batch=[];size=0;}
     if(s.type==='narration') batch.push({id:s.id,text});
     size+=text.length;
   }
   if(batch.length)batches.push(batch);
   const outputs = new Map();
   const settings = getSettings();
-  for (let i=0;i<batches.length;i++) {
+  const processBatch = async (current, label, depth=0) => {
     if (signal?.cancelled) throw new Error('已取消');
-    const current = batches[i];
     const first = snapshot.findIndex(s => s.id === current[0].id), last = snapshot.findIndex(s => s.id === current.at(-1).id);
     const context = snapshot.slice(Math.max(0,first-2),last+3).map(s => ({ id:s.id,type:s.type,speaker:s.speaker,text:byId.get(s.id) ?? s.text }));
-    onProgress?.(`DeepSeek 整合视频旁白 ${i+1}/${batches.length} 批（对白保持原文）`);
+    onProgress?.(`DeepSeek 整合视频旁白 ${label} 批，${current.length} 段旁白（对白保持原文）`);
     const template={narration:[{id:current[0].id,text:'必要旁白可在此整合'}],omitted_ids:current.slice(1).map(s=>s.id)};
     const messages=[{role:'system',content:COMPRESSION_SYSTEM},{role:'user',content:JSON.stringify({chapter:chapter.title,editable_narration:current,context,chapter_context:chapterContext,required_output_example:template})}];
     let accepted, lastError;
     for(let attempt=0;attempt<2;attempt++) {
       if(signal?.cancelled) throw new Error('已取消');
-      const result=await request(settings,messages,{temperature:0.1});
+      onProgress?.(`DeepSeek 整合视频旁白 ${label} 批，${current.length} 段${attempt ? '，校验纠正重试' : ''}（对白保持原文）`);
+      let result;
+      try {
+        result=await request(settings,messages,{temperature:0.1});
+      } catch(e) {
+        // 格式解析失败同样可以缩小批次；鉴权、网络及取消错误直接上抛。
+        if(signal?.cancelled) throw new Error('已取消');
+        if(!/无法解析 LLM 输出的 JSON|LLM 返回格式异常/.test(e.message)) throw e;
+        lastError=new Error('模型未返回完整可解析的旁白 JSON');
+        messages.push({role:'user',content:'上次结果无法解析，请只返回完整 JSON，包含本批所有旁白编号的保留或省略决定。'});
+        continue;
+      }
       try {
         if (!Array.isArray(result?.narration) || (result.omitted_ids !== undefined && !Array.isArray(result.omitted_ids))) throw new Error('必须返回 narration 数组和 omitted_ids 数组');
         const expected = new Map(current.map(s => [s.id,s.text])), candidate=new Map();
@@ -87,7 +97,8 @@ export async function compressChapterNarration(chapterId, { signal, onProgress, 
           if(!Number.isSafeInteger(id) || !expected.has(id) || candidate.has(id))throw new Error('省略编号错误、重复或与保留旁白冲突');
           candidate.set(id,'');
         }
-        if(candidate.size!==expected.size)throw new Error('每个旁白编号必须明确保留或省略');
+        const missing = [...expected.keys()].filter(id=>!candidate.has(id));
+        if(missing.length) throw new Error(`缺少 ${missing.length} 个旁白编号：${missing.join(',')}；请逐个明确保留或省略，不能默认省略`);
         if([...candidate.values()].reduce((n,t)=>n+t.length,0)>current.reduce((n,t)=>n+t.text.length,0)) throw new Error('整合后旁白总字数超过原文');
         accepted=candidate;break;
       }catch(e){
@@ -95,9 +106,19 @@ export async function compressChapterNarration(chapterId, { signal, onProgress, 
         messages.push({role:'assistant',content:JSON.stringify(result)},{role:'user',content:`校验失败：${e.message}。请重新统筹，每个编号明确保留或列入 omitted_ids，不要机械逐条缩句。格式示例：${JSON.stringify(template)}`});
       }
     }
-    if(!accepted) throw new Error(`压缩结果校验失败（${lastError.message}），未修改本章`);
+    if(!accepted) {
+      if(current.length>16 && depth<3) {
+        onProgress?.(`第 ${label} 批校验未通过，自动拆小重试（${current.length} 段旁白）`);
+        const mid=Math.ceil(current.length/2);
+        await processBatch(current.slice(0,mid),`${label}.1`,depth+1);
+        await processBatch(current.slice(mid),`${label}.2`,depth+1);
+        return;
+      }
+      throw new Error(`第 ${label} 批（${current.length} 段旁白）整合结果校验失败：${lastError.message}；未修改本章，可重试`);
+    }
     for(const [id,text] of accepted) outputs.set(id,text);
-  }
+  };
+  for (let i=0;i<batches.length;i++) await processBatch(batches[i],`${i+1}/${batches.length}`);
   if (signal?.cancelled) throw new Error('已取消');
   return tx(() => {
     if (signature(segmentsOf(chapterId)) !== beforeSignature) throw new Error('压缩期间章节片段发生变化，未应用过时结果');
