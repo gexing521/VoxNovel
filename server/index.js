@@ -249,7 +249,8 @@ route('POST', '/api/novels/:id/generate', (req, res, { id }, body) => {
 route('GET', '/api/novels/:id/download', async (req, res, { id }) => {
   const n = q.get('SELECT * FROM novels WHERE id = ?', id) || notFound();
   const chs = q.all('SELECT * FROM chapters WHERE novel_id = ? ORDER BY idx', id);
-  const files = chs.flatMap((c) => chapterFiles(c, `${safeName(n.title)}/${String(c.idx + 1).padStart(4, '0')}_${safeName(c.title)}/`));
+  const files = chs.flatMap((c) => mergedChapterFiles(c, `${safeName(n.title)}/${String(c.idx + 1).padStart(4, '0')}_${safeName(c.title)}/`));
+  if (!files.length) bad('还没有已拼接完成的整章音频');
   return zipResponse(res, `${safeName(n.title)}.zip`, files);
 });
 
@@ -612,6 +613,13 @@ route('POST', '/api/jobs/:id/cancel', (req, res, { id }) => { cancelJob(Number(i
 route('DELETE', '/api/jobs', () => { q.run(`DELETE FROM jobs WHERE status NOT IN ('queued','running')`); return { ok: true }; });
 
 // --- 下载辅助 ---
+function mergedChapterFiles(c, prefix) {
+  if (!c.merged_audio || !c.merged_lrc) return [];
+  const files = [c.merged_audio, c.merged_lrc].map((file) => ({
+    name: prefix + path.basename(file), path: path.join(AUDIO_DIR, file),
+  }));
+  return files.every((file) => fs.existsSync(file.path)) ? files : [];
+}
 function chapterFiles(c, prefix) {
   const files = [];
   for (const s of q.all(`SELECT * FROM segments WHERE chapter_id = ? AND narration_omitted=0 AND status = 'done' ORDER BY idx`, c.id)) {
