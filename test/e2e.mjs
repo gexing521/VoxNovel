@@ -221,6 +221,17 @@ try {
   await call('/segments/' + ch2.segments[1].id, { text: '老板抬起头，笑着说道。' }, 'PUT');
   await waitJob((await call(`/chapters/${ch2.id}/generate`, {})).jobId);
   assert(wsCalls === calls0 + 1, '修改后只重新生成 1 个片段');
+  const alternateVoice=voices.find(x=>x.gender==='male' && x.id!==v.id);
+  if(alternateVoice){
+    const linesToRefresh=ch2.segments.filter(x=>x.type==='dialogue' && x.character_id===lin.id).length;
+    const voiceCalls=wsCalls;
+    await call(`/characters/${lin.id}/voices`,{voice_db_id:alternateVoice.id,is_default:true});
+    const voiceJob=await waitJob((await call(`/chapters/${ch2.id}/generate`,{})).jobId);
+    assert(voiceJob.status==='done' && wsCalls===voiceCalls+linesToRefresh,`切换角色默认音色后只重新生成该角色的 ${linesToRefresh} 个片段`);
+    const stableCalls=wsCalls;
+    await waitJob((await call(`/chapters/${ch2.id}/generate`,{})).jobId);
+    assert(wsCalls===stableCalls,'重新生成后未变化片段再次跳过');
+  }
   // 改说话人 → 自动建角色
   const up = await call('/segments/' + ch2.segments[2].id, { speaker: '神秘人' }, 'PUT');
   assert(up.type === 'dialogue' && up.speaker === '神秘人' && up.voice, '改说话人为新角色并自动分配音色');

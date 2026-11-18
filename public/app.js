@@ -253,7 +253,7 @@ async function viewNovel(id) {
             <td><div class="row" style="gap:4px;justify-content:flex-end">
               <button class="btn sm" data-split>${c.split_status === 'done' ? '重新拆分' : '拆分'}</button>
               <button class="btn sm" data-compress ${c.split_status === 'done' && !compressionActive(c) && !compressionBlocker(n) && !compressionBusy ? '' : 'disabled'}>${compressionCurrent(c) ? '重新整合' : '整合旁白'}</button>
-              <button class="btn sm" data-gen ${c.split_status === 'done' && !generationBlocker(n) ? '' : 'disabled'}>生成</button>
+              <button class="btn sm" data-gen ${c.split_status === 'done' && !generationBlocker(n) ? '' : 'disabled'}>生成 / 重新生成音频</button>
               <a class="btn sm" href="/api/chapters/${c.id}/download-merged" title="下载整章拼接 MP3 和 LRC" ${c.merged_audio && c.merged_lrc ? '' : 'aria-disabled="true" tabindex="-1" style="opacity:.5;pointer-events:none"'}>下载整章</a>
               <a class="btn sm" href="#/chapter/${c.id}">编辑</a>
               <button class="icon" data-chdel title="删除章节">✕</button>
@@ -387,7 +387,12 @@ async function viewNovel(id) {
         } finally { compressionBusy = false; render(); }
         return;
       }
-      if (t.closest('[data-gen]')) return startJob(`/chapters/${cid}/generate`, {}, '生成任务已开始');
+      if (t.closest('[data-gen]')) {
+        if(generationBlocker(n)) return toast('请等待当前任务完成后再生成，进度见任务页');
+        const force = await askForce('生成 / 重新生成音频');
+        if (force === null) return;
+        return startJob(`/chapters/${cid}/generate`, { force }, '音频生成任务已开始');
+      }
       if (t.closest('[data-play-merged]')) return player.play(fileUrl(c.merged_audio), c.title, n.title);
       if (t.closest('[data-chdel]')) {
         if (!(await confirmBox(`删除章节「${c.title}」？`, { danger: true, okText: '删除' }))) return;
@@ -415,12 +420,12 @@ async function openIdentityReport(novelId, chapters) {
   m.el.addEventListener('click', e => { if (e.target.closest('a[href^="#/chapter/"]')) m.close(); });
 }
 
-async function askForce() {
+async function askForce(title = '生成音频') {
   return new Promise((resolve) => {
     let done = false;
     const m = modal({
-      title: '生成音频',
-      body: `<div class="muted" style="line-height:1.7">默认只生成<b>未生成或已修改</b>的片段（文本、音色、情绪变化都会自动识别），已完成的片段会跳过。</div>
+      title,
+      body: `<div class="muted" style="line-height:1.7">默认只生成<b>未生成或已修改</b>的片段（文本、音色、情绪变化都会自动识别），已完成且未变化的片段会跳过。</div>
         <label class="check"><input type="checkbox" data-force /> 强制全部重新生成</label>`,
       foot: '<button class="btn" data-x>取消</button><button class="btn primary" data-ok>开始生成</button>',
       onClose: () => !done && resolve(null),
@@ -506,7 +511,7 @@ async function viewChapter(id) {
           <div class="panel">
             <h3>操作</h3>
             <div class="settings-sec" style="gap:8px">
-              <button class="btn primary" data-gen ${c.segments.length && !generationBlocker(c) ? '' : 'disabled'}>生成本章音频</button>
+              <button class="btn primary" data-gen ${c.segments.length && !generationBlocker(c) ? '' : 'disabled'}>${c.segments.some(s => s.audio_file) ? '重新生成本章音频' : '生成本章音频'}</button>
               <button class="btn" data-split>${c.segments.length ? '重新拆分' : '拆分'}</button>
               <button class="btn" data-orig-toggle>${showOriginal ? '隐藏原文' : '查看/编辑原文'}</button>
               <button class="btn" data-dl ${done ? '' : 'disabled'}>下载本章 ZIP</button>
